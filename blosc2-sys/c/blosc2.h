@@ -243,11 +243,11 @@ enum {
  *
  * @sa #blosc1_compress
  */
-enum blosc_filter_code {
+enum {
 #ifndef BLOSC_H
-  BLOSC_NOFILTER = 0,
-  //!< No shuffle (for compatibility with Blosc1).
   BLOSC_NOSHUFFLE = 0,
+  //!< No shuffle (for compatibility with Blosc1).
+  BLOSC_NOFILTER = 0,
   //!< No filter.
   BLOSC_SHUFFLE = 1,
   //!< Byte-wise shuffle. `filters_meta` does not have any effect here.
@@ -441,7 +441,7 @@ enum {
  * Each time an error code is added here, its corresponding message error should be added in
  * print_error()
  */
-enum blosc2_error {
+enum {
   BLOSC2_ERROR_SUCCESS = 0,           //<! Success
   BLOSC2_ERROR_FAILURE = -1,          //<! Generic failure
   BLOSC2_ERROR_STREAM = -2,           //<! Bad stream

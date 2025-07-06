@@ -19,8 +19,6 @@ fn generate_bindings() {
         .allowlist_recursively(false)
         .default_enum_style(bindgen::EnumVariation::Consts)
         .blocklist_item("blosc2_get_blosc2_stdio_mmap_defaults")
-        .rustified_enum("blosc_filter_code")
-        .rustified_enum("blosc2_error")
         .opaque_type("blosc_timestamp_t")
         .blocklist_item("BLOSC2_CPARAMS_DEFAULTS")
         .blocklist_item("BLOSC2_DPARAMS_DEFAULTS")

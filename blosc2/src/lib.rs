@@ -1,68 +1,6 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-pub struct CParams(blosc2_sys::blosc2_cparams);
-impl Default for CParams {
-    fn default() -> Self {
-        Self(blosc2_sys::blosc2_cparams {
-            compcode: blosc2_sys::BLOSC_BLOSCLZ as _,
-            compcode_meta: 0,
-            clevel: 5,
-            use_dict: 0,
-            typesize: 8,
-            nthreads: 1,
-            blocksize: 0,
-            splitmode: blosc2_sys::BLOSC_FORWARD_COMPAT_SPLIT as _,
-            schunk: std::ptr::null_mut(),
-            filters: [
-                0,
-                0,
-                0,
-                0,
-                0,
-                blosc2_sys::blosc_filter_code::BLOSC_SHUFFLE as _,
-            ],
-            filters_meta: [0, 0, 0, 0, 0, 0],
-            prefilter: None,
-            preparams: std::ptr::null_mut(),
-            tuner_params: std::ptr::null_mut(),
-            tuner_id: 0,
-            instr_codec: false,
-            codec_params: std::ptr::null_mut(),
-            filter_params: [std::ptr::null_mut(); 6],
-        })
-    }
-}
-
-pub struct DParams(blosc2_sys::blosc2_dparams);
-impl Default for DParams {
-    fn default() -> Self {
-        Self(blosc2_sys::blosc2_dparams {
-            nthreads: 1,
-            schunk: std::ptr::null_mut(),
-            postfilter: None,
-            postparams: std::ptr::null_mut(),
-        })
-    }
-}
-
-pub struct Context(NonNull<blosc2_sys::blosc2_context>);
-impl Context {
-    pub fn new_compress(params: CParams) -> Option<Self> {
-        let ctx = unsafe { blosc2_sys::blosc2_create_cctx(params.0) };
-        Some(Context(NonNull::new(ctx)?))
-    }
-    pub fn new_decompress(params: DParams) -> Option<Self> {
-        let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
-        Some(Context(NonNull::new(ctx)?))
-    }
-}
-impl Drop for Context {
-    fn drop(&mut self) {
-        unsafe { blosc2_sys::blosc2_free_ctx(self.0.as_ptr()) }
-    }
-}
-
 pub fn compress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, CompressError> {
     let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
     let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_max_len);
@@ -208,17 +146,159 @@ impl std::fmt::Display for DecompressError {
 }
 impl std::error::Error for DecompressError {}
 
+#[derive(Debug)]
+pub struct Context(NonNull<blosc2_sys::blosc2_context>);
+impl Context {
+    pub fn new_compress(params: CParams) -> Option<Self> {
+        let ctx = unsafe { blosc2_sys::blosc2_create_cctx(params.0) };
+        Some(Context(NonNull::new(ctx)?))
+    }
+    pub fn new_decompress(params: DParams) -> Option<Self> {
+        let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
+        Some(Context(NonNull::new(ctx)?))
+    }
+}
+impl Drop for Context {
+    fn drop(&mut self) {
+        unsafe { blosc2_sys::blosc2_free_ctx(self.0.as_ptr()) }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CParams(blosc2_sys::blosc2_cparams);
+impl Default for CParams {
+    fn default() -> Self {
+        Self(blosc2_sys::blosc2_cparams {
+            compcode: blosc2_sys::BLOSC_BLOSCLZ as _,
+            compcode_meta: 0,
+            clevel: 5,
+            use_dict: 0,
+            typesize: 8,
+            nthreads: 1,
+            blocksize: 0,
+            splitmode: SplitMode::ForwardCompat as _,
+            schunk: std::ptr::null_mut(),
+            filters: [0, 0, 0, 0, 0, blosc2_sys::BLOSC_SHUFFLE as _],
+            filters_meta: [0, 0, 0, 0, 0, 0],
+            prefilter: None,
+            preparams: std::ptr::null_mut(),
+            tuner_params: std::ptr::null_mut(),
+            tuner_id: 0,
+            instr_codec: false,
+            codec_params: std::ptr::null_mut(),
+            filter_params: [std::ptr::null_mut(); 6],
+        })
+    }
+}
+impl CParams {
+    #[must_use]
+    pub fn compressor(mut self, compressor: CompressAlgo) -> Self {
+        self.0.compcode = compressor as _;
+        self
+    }
+    #[must_use]
+    pub fn clevel(mut self, clevel: u32) -> Self {
+        self.0.clevel = clevel as u8;
+        self
+    }
+    #[must_use]
+    pub fn typesize(mut self, typesize: usize) -> Self {
+        self.0.typesize = typesize as i32;
+        self
+    }
+    #[must_use]
+    pub fn nthreads(mut self, nthreads: usize) -> Self {
+        self.0.nthreads = nthreads as i16;
+        self
+    }
+    #[must_use]
+    pub fn blocksize(mut self, blocksize: usize) -> Self {
+        self.0.blocksize = blocksize as i32;
+        self
+    }
+    #[must_use]
+    pub fn splitmode(mut self, splitmode: SplitMode) -> Self {
+        self.0.splitmode = splitmode as _;
+        self
+    }
+    #[must_use]
+    pub fn filters(mut self, filters: &[Filter]) -> Option<Self> {
+        if filters.len() > 6 {
+            return None;
+        }
+        self.0.filters = [blosc2_sys::BLOSC_NOFILTER as _; 6];
+        self.0.filters_meta = [0; 6];
+        for (i, filter) in filters.iter().enumerate() {
+            let (filter, meta) = match filter {
+                Filter::Shuffle => (blosc2_sys::BLOSC_SHUFFLE, 0),
+                Filter::BitShuffle => (blosc2_sys::BLOSC_BITSHUFFLE, 0),
+                Filter::Delta => (blosc2_sys::BLOSC_DELTA, 0),
+                Filter::TruncPrecision(prec_bits) => {
+                    (blosc2_sys::BLOSC_TRUNC_PREC, *prec_bits as u8)
+                }
+            };
+            self.0.filters[i] = filter as _;
+            self.0.filters_meta[i] = meta;
+        }
+        Some(self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CompressAlgo {
+    Blosclz = blosc2_sys::BLOSC_BLOSCLZ as _,
+    Lz4 = blosc2_sys::BLOSC_LZ4 as _,
+    Lz4hc = blosc2_sys::BLOSC_LZ4HC as _,
+    Zlib = blosc2_sys::BLOSC_ZLIB as _,
+    Zstd = blosc2_sys::BLOSC_ZSTD as _,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Filter {
+    Shuffle,
+    BitShuffle,
+    Delta,
+    // Positive values of prec_bits will set absolute precision bits, whereas negative
+    // values will reduce the precision bits (similar to Python slicing convention).
+    TruncPrecision(i8),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum SplitMode {
+    Always = blosc2_sys::BLOSC_ALWAYS_SPLIT as _,
+    Never = blosc2_sys::BLOSC_NEVER_SPLIT as _,
+    Auto = blosc2_sys::BLOSC_AUTO_SPLIT as _,
+    ForwardCompat = blosc2_sys::BLOSC_FORWARD_COMPAT_SPLIT as _,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct DParams(blosc2_sys::blosc2_dparams);
+impl Default for DParams {
+    fn default() -> Self {
+        Self(blosc2_sys::blosc2_dparams {
+            nthreads: 1,
+            schunk: std::ptr::null_mut(),
+            postfilter: None,
+            postparams: std::ptr::null_mut(),
+        })
+    }
+}
+impl DParams {
+    #[must_use]
+    pub fn nthreads(mut self, nthreads: usize) -> Self {
+        self.0.nthreads = nthreads as i16;
+        self
+    }
+}
+
 pub fn list_compressors() -> impl IntoIterator<Item = &'static str> {
     let compressors = unsafe { blosc2_sys::blosc2_list_compressors() };
     let len = unsafe { strlen(compressors) };
-    let slice = unsafe { std::slice::from_raw_parts(compressors.cast(), len) };
+    let slice = unsafe { std::slice::from_raw_parts(compressors.cast(), len + 1) };
     let compressors = std::ffi::CStr::from_bytes_with_nul(slice).unwrap();
     let compressors = compressors.to_str().unwrap();
     compressors.split(',')
 }
-
-// TODO
-// blosc2_get_complib_info
 
 unsafe fn strlen(s: *const ::core::ffi::c_char) -> usize {
     let mut len = 0;
