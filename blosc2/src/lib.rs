@@ -1,7 +1,7 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-pub fn compress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, CompressError> {
+pub fn compress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Error> {
     let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
     let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_max_len);
     unsafe { dst.set_len(dst_max_len) };
@@ -18,7 +18,7 @@ pub fn compress_into(
     src: &[u8],
     dst: &mut [MaybeUninit<u8>],
     context: &mut Context,
-) -> Result<usize, CompressError> {
+) -> Result<usize, Error> {
     let status = unsafe {
         blosc2_sys::blosc2_compress_ctx(
             context.0.as_ptr(),
@@ -33,37 +33,17 @@ pub fn compress_into(
             debug_assert!(len as usize <= dst.len());
             Ok(len as usize)
         }
-        0 => Err(CompressError::DestinationBufferTooSmall),
+        0 => Err(Error::WriteBuffer),
         _ => {
             debug_assert!(status < 0);
-            Err(CompressError::InternalError(status))
+            Err(Error::from_int(status))
         }
     }
 }
 
-/// Error that can occur during compression.
-#[derive(Debug)]
-pub enum CompressError {
-    /// Error indicating that the destination buffer is too small to hold the compressed data.
-    DestinationBufferTooSmall,
-    /// blosc internal error.
-    InternalError(i32),
-}
-impl std::fmt::Display for CompressError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CompressError::DestinationBufferTooSmall => {
-                f.write_str("destination buffer is too small")
-            }
-            CompressError::InternalError(status) => write!(f, "blosc internal error: {status}"),
-        }
-    }
-}
-impl std::error::Error for CompressError {}
-
-pub fn decompress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, DecompressError> {
+pub fn decompress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Error> {
     if src.len() < blosc2_sys::BLOSC_MIN_HEADER_LENGTH as usize {
-        return Err(DecompressError::DecompressingError);
+        return Err(Error::ReadBuffer);
     }
     let mut nbytes = MaybeUninit::uninit();
     let mut cbytes = MaybeUninit::uninit();
@@ -77,7 +57,7 @@ pub fn decompress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Decompre
         )
     };
     if status < 0 {
-        return Err(DecompressError::InternalError(status));
+        return Err(Error::from_int(status));
     }
     let dst_len = unsafe { nbytes.assume_init() } as usize;
 
@@ -96,7 +76,7 @@ pub fn decompress_into(
     src: &[u8],
     dst: &mut [MaybeUninit<u8>],
     context: &mut Context,
-) -> Result<usize, DecompressError> {
+) -> Result<usize, Error> {
     let status = unsafe {
         blosc2_sys::blosc2_decompress_ctx(
             context.0.as_ptr(),
@@ -111,40 +91,175 @@ pub fn decompress_into(
             debug_assert!(len as usize <= dst.len());
             Ok(len as usize)
         }
-        _ => Err(DecompressError::InternalError(status)),
+        _ => Err(Error::from_int(status)),
     }
 }
 
-/// Error that can occur during decompression.
 #[derive(Debug)]
-pub enum DecompressError {
-    /// Error indicating that the destination buffer is too small to hold the decompressed data.
-    DestinationBufferTooSmall,
-    /// Error indicating that the data could not be decompressed.
-    DecompressingError,
-    /// blosc internal error.
-    InternalError(i32),
-    // /// An I/O error occurred while reading the compressed data.
-    // IoError(std::io::Error),
+#[non_exhaustive]
+pub enum Error {
+    /// Generic failure
+    Failure = blosc2_sys::BLOSC2_ERROR_FAILURE as _,
+    /// Bad stream
+    Stream = blosc2_sys::BLOSC2_ERROR_STREAM as _,
+    /// Invalid data
+    Data = blosc2_sys::BLOSC2_ERROR_DATA as _,
+    /// Memory alloc/realloc failure
+    MemoryAlloc = blosc2_sys::BLOSC2_ERROR_MEMORY_ALLOC as _,
+    /// Not enough space to read
+    ReadBuffer = blosc2_sys::BLOSC2_ERROR_READ_BUFFER as _,
+    /// Not enough space to write
+    WriteBuffer = blosc2_sys::BLOSC2_ERROR_WRITE_BUFFER as _,
+    /// Codec not supported
+    CodecSupport = blosc2_sys::BLOSC2_ERROR_CODEC_SUPPORT as _,
+    /// Invalid parameter supplied to codec
+    CodecParam = blosc2_sys::BLOSC2_ERROR_CODEC_PARAM as _,
+    /// Codec dictionary error
+    CodecDict = blosc2_sys::BLOSC2_ERROR_CODEC_DICT as _,
+    /// Version not supported
+    VersionSupport = blosc2_sys::BLOSC2_ERROR_VERSION_SUPPORT as _,
+    /// Invalid value in header
+    InvalidHeader = blosc2_sys::BLOSC2_ERROR_INVALID_HEADER as _,
+    /// Invalid parameter supplied to function
+    InvalidParam = blosc2_sys::BLOSC2_ERROR_INVALID_PARAM as _,
+    /// File read failure
+    FileRead = blosc2_sys::BLOSC2_ERROR_FILE_READ as _,
+    /// File write failure
+    FileWrite = blosc2_sys::BLOSC2_ERROR_FILE_WRITE as _,
+    /// File open failure
+    FileOpen = blosc2_sys::BLOSC2_ERROR_FILE_OPEN as _,
+    /// Not found
+    NotFound = blosc2_sys::BLOSC2_ERROR_NOT_FOUND as _,
+    /// Bad run length encoding
+    RunLength = blosc2_sys::BLOSC2_ERROR_RUN_LENGTH as _,
+    /// Filter pipeline error
+    FilterPipeline = blosc2_sys::BLOSC2_ERROR_FILTER_PIPELINE as _,
+    /// Chunk insert failure
+    ChunkInsert = blosc2_sys::BLOSC2_ERROR_CHUNK_INSERT as _,
+    /// Chunk append failure
+    ChunkAppend = blosc2_sys::BLOSC2_ERROR_CHUNK_APPEND as _,
+    /// Chunk update failure
+    ChunkUpdate = blosc2_sys::BLOSC2_ERROR_CHUNK_UPDATE as _,
+    /// Sizes larger than 2gb not supported
+    TwoGbLimit = blosc2_sys::BLOSC2_ERROR_2GB_LIMIT as _,
+    /// Super-chunk copy failure
+    SchunkCopy = blosc2_sys::BLOSC2_ERROR_SCHUNK_COPY as _,
+    /// Wrong type for frame
+    FrameType = blosc2_sys::BLOSC2_ERROR_FRAME_TYPE as _,
+    /// File truncate failure
+    FileTruncate = blosc2_sys::BLOSC2_ERROR_FILE_TRUNCATE as _,
+    /// Thread or thread context creation failure
+    ThreadCreate = blosc2_sys::BLOSC2_ERROR_THREAD_CREATE as _,
+    /// Postfilter failure
+    Postfilter = blosc2_sys::BLOSC2_ERROR_POSTFILTER as _,
+    /// Special frame failure
+    FrameSpecial = blosc2_sys::BLOSC2_ERROR_FRAME_SPECIAL as _,
+    /// Special super-chunk failure
+    SChunkSpecial = blosc2_sys::BLOSC2_ERROR_SCHUNK_SPECIAL as _,
+    /// IO plugin error
+    PluginIO = blosc2_sys::BLOSC2_ERROR_PLUGIN_IO as _,
+    /// Remove file failure
+    FileRemove = blosc2_sys::BLOSC2_ERROR_FILE_REMOVE as _,
+    /// Pointer is null
+    NullPointer = blosc2_sys::BLOSC2_ERROR_NULL_POINTER as _,
+    /// Invalid index
+    InvalidIndex = blosc2_sys::BLOSC2_ERROR_INVALID_INDEX as _,
+    /// Metalayer has not been found
+    MetalayerNotFound = blosc2_sys::BLOSC2_ERROR_METALAYER_NOT_FOUND as _,
+    /// Max buffer size exceeded
+    MaxBufsizeExceeded = blosc2_sys::BLOSC2_ERROR_MAX_BUFSIZE_EXCEEDED as _,
+    /// Tuner failure
+    Tuner = blosc2_sys::BLOSC2_ERROR_TUNER as _,
 }
-// impl From<std::io::Error> for DecompressError {
-//     fn from(err: std::io::Error) -> Self {
-//         DecompressError::IoError(err)
-//     }
-// }
-impl std::fmt::Display for DecompressError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DecompressError::DestinationBufferTooSmall => {
-                f.write_str("destination buffer is too small")
+impl Error {
+    fn from_int(code: core::ffi::c_int) -> Self {
+        match code {
+            blosc2_sys::BLOSC2_ERROR_FAILURE => Error::Failure,
+            blosc2_sys::BLOSC2_ERROR_STREAM => Error::Stream,
+            blosc2_sys::BLOSC2_ERROR_DATA => Error::Data,
+            blosc2_sys::BLOSC2_ERROR_MEMORY_ALLOC => Error::MemoryAlloc,
+            blosc2_sys::BLOSC2_ERROR_READ_BUFFER => Error::ReadBuffer,
+            blosc2_sys::BLOSC2_ERROR_WRITE_BUFFER => Error::WriteBuffer,
+            blosc2_sys::BLOSC2_ERROR_CODEC_SUPPORT => Error::CodecSupport,
+            blosc2_sys::BLOSC2_ERROR_CODEC_PARAM => Error::CodecParam,
+            blosc2_sys::BLOSC2_ERROR_CODEC_DICT => Error::CodecDict,
+            blosc2_sys::BLOSC2_ERROR_VERSION_SUPPORT => Error::VersionSupport,
+            blosc2_sys::BLOSC2_ERROR_INVALID_HEADER => Error::InvalidHeader,
+            blosc2_sys::BLOSC2_ERROR_INVALID_PARAM => Error::InvalidParam,
+            blosc2_sys::BLOSC2_ERROR_FILE_READ => Error::FileRead,
+            blosc2_sys::BLOSC2_ERROR_FILE_WRITE => Error::FileWrite,
+            blosc2_sys::BLOSC2_ERROR_FILE_OPEN => Error::FileOpen,
+            blosc2_sys::BLOSC2_ERROR_NOT_FOUND => Error::NotFound,
+            blosc2_sys::BLOSC2_ERROR_RUN_LENGTH => Error::RunLength,
+            blosc2_sys::BLOSC2_ERROR_FILTER_PIPELINE => Error::FilterPipeline,
+            blosc2_sys::BLOSC2_ERROR_CHUNK_INSERT => Error::ChunkInsert,
+            blosc2_sys::BLOSC2_ERROR_CHUNK_APPEND => Error::ChunkAppend,
+            blosc2_sys::BLOSC2_ERROR_CHUNK_UPDATE => Error::ChunkUpdate,
+            blosc2_sys::BLOSC2_ERROR_2GB_LIMIT => Error::TwoGbLimit,
+            blosc2_sys::BLOSC2_ERROR_SCHUNK_COPY => Error::SchunkCopy,
+            blosc2_sys::BLOSC2_ERROR_FRAME_TYPE => Error::FrameType,
+            blosc2_sys::BLOSC2_ERROR_FILE_TRUNCATE => Error::FileTruncate,
+            blosc2_sys::BLOSC2_ERROR_THREAD_CREATE => Error::ThreadCreate,
+            blosc2_sys::BLOSC2_ERROR_POSTFILTER => Error::Postfilter,
+            blosc2_sys::BLOSC2_ERROR_FRAME_SPECIAL => Error::FrameSpecial,
+            blosc2_sys::BLOSC2_ERROR_SCHUNK_SPECIAL => Error::SChunkSpecial,
+            blosc2_sys::BLOSC2_ERROR_PLUGIN_IO => Error::PluginIO,
+            blosc2_sys::BLOSC2_ERROR_FILE_REMOVE => Error::FileRemove,
+            blosc2_sys::BLOSC2_ERROR_NULL_POINTER => Error::NullPointer,
+            blosc2_sys::BLOSC2_ERROR_INVALID_INDEX => Error::InvalidIndex,
+            blosc2_sys::BLOSC2_ERROR_METALAYER_NOT_FOUND => Error::MetalayerNotFound,
+            blosc2_sys::BLOSC2_ERROR_MAX_BUFSIZE_EXCEEDED => Error::MaxBufsizeExceeded,
+            blosc2_sys::BLOSC2_ERROR_TUNER => Error::Tuner,
+            unknown => {
+                eprintln!("Unknown blosc2 error code: {unknown}");
+                Error::Failure
             }
-            DecompressError::DecompressingError => f.write_str("failed to decompress the data"),
-            DecompressError::InternalError(status) => write!(f, "blosc internal error: {status}"),
-            // DecompressError::IoError(err) => write!(f, "I/O error: {err}"),
         }
     }
 }
-impl std::error::Error for DecompressError {}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Failure => f.write_str("generic failure"),
+            Error::Stream => f.write_str("bad stream"),
+            Error::Data => f.write_str("invalid data"),
+            Error::MemoryAlloc => f.write_str("memory alloc/realloc failure"),
+            Error::ReadBuffer => f.write_str("not enough space to read"),
+            Error::WriteBuffer => f.write_str("not enough space to write"),
+            Error::CodecSupport => f.write_str("codec not supported"),
+            Error::CodecParam => f.write_str("invalid parameter supplied to codec"),
+            Error::CodecDict => f.write_str("codec dictionary error"),
+            Error::VersionSupport => f.write_str("version not supported"),
+            Error::InvalidHeader => f.write_str("invalid value in header"),
+            Error::InvalidParam => f.write_str("invalid parameter supplied to function"),
+            Error::FileRead => f.write_str("file read failure"),
+            Error::FileWrite => f.write_str("file write failure"),
+            Error::FileOpen => f.write_str("file open failure"),
+            Error::NotFound => f.write_str("not found"),
+            Error::RunLength => f.write_str("bad run length encoding"),
+            Error::FilterPipeline => f.write_str("filter pipeline error"),
+            Error::ChunkInsert => f.write_str("chunk insert failure"),
+            Error::ChunkAppend => f.write_str("chunk append failure"),
+            Error::ChunkUpdate => f.write_str("chunk update failure"),
+            Error::TwoGbLimit => f.write_str("sizes larger than 2gb not supported"),
+            Error::SchunkCopy => f.write_str("super-chunk copy failure"),
+            Error::FrameType => f.write_str("wrong type for frame"),
+            Error::FileTruncate => f.write_str("file truncate failure"),
+            Error::ThreadCreate => f.write_str("thread or thread context creation failure"),
+            Error::Postfilter => f.write_str("postfilter failure"),
+            Error::FrameSpecial => f.write_str("special frame failure"),
+            Error::SChunkSpecial => f.write_str("special super-chunk failure"),
+            Error::PluginIO => f.write_str("IO plugin error"),
+            Error::FileRemove => f.write_str("remove file failure"),
+            Error::NullPointer => f.write_str("pointer is null"),
+            Error::InvalidIndex => f.write_str("invalid index"),
+            Error::MetalayerNotFound => f.write_str("metalayer has not been found"),
+            Error::MaxBufsizeExceeded => f.write_str("max buffer size exceeded"),
+            Error::Tuner => f.write_str("tuner failure"),
+        }
+    }
+}
+impl std::error::Error for Error {}
 
 #[derive(Debug)]
 pub struct Context(NonNull<blosc2_sys::blosc2_context>);
@@ -192,39 +307,39 @@ impl Default for CParams {
 }
 impl CParams {
     #[must_use]
-    pub fn compressor(mut self, compressor: CompressAlgo) -> Self {
+    pub fn compressor(&mut self, compressor: CompressAlgo) -> &mut Self {
         self.0.compcode = compressor as _;
         self
     }
     #[must_use]
-    pub fn clevel(mut self, clevel: u32) -> Self {
+    pub fn clevel(&mut self, clevel: u32) -> &mut Self {
         self.0.clevel = clevel as u8;
         self
     }
     #[must_use]
-    pub fn typesize(mut self, typesize: usize) -> Self {
+    pub fn typesize(&mut self, typesize: usize) -> &mut Self {
         self.0.typesize = typesize as i32;
         self
     }
     #[must_use]
-    pub fn nthreads(mut self, nthreads: usize) -> Self {
+    pub fn nthreads(&mut self, nthreads: usize) -> &mut Self {
         self.0.nthreads = nthreads as i16;
         self
     }
     #[must_use]
-    pub fn blocksize(mut self, blocksize: usize) -> Self {
+    pub fn blocksize(&mut self, blocksize: usize) -> &mut Self {
         self.0.blocksize = blocksize as i32;
         self
     }
     #[must_use]
-    pub fn splitmode(mut self, splitmode: SplitMode) -> Self {
+    pub fn splitmode(&mut self, splitmode: SplitMode) -> &mut Self {
         self.0.splitmode = splitmode as _;
         self
     }
     #[must_use]
-    pub fn filters(mut self, filters: &[Filter]) -> Option<Self> {
+    pub fn filters(&mut self, filters: &[Filter]) -> Result<&mut Self, Error> {
         if filters.len() > 6 {
-            return None;
+            return Err(Error::InvalidParam);
         }
         self.0.filters = [blosc2_sys::BLOSC_NOFILTER as _; 6];
         self.0.filters_meta = [0; 6];
@@ -240,7 +355,7 @@ impl CParams {
             self.0.filters[i] = filter as _;
             self.0.filters_meta[i] = meta;
         }
-        Some(self)
+        Ok(self)
     }
 }
 
@@ -285,7 +400,7 @@ impl Default for DParams {
 }
 impl DParams {
     #[must_use]
-    pub fn nthreads(mut self, nthreads: usize) -> Self {
+    pub fn nthreads(&mut self, nthreads: usize) -> &mut Self {
         self.0.nthreads = nthreads as i16;
         self
     }
