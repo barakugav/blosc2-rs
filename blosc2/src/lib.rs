@@ -1,7 +1,7 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-pub fn compress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Error> {
+pub fn compress(src: &[u8], context: &mut CContext) -> Result<Vec<u8>, Error> {
     let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
     let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_max_len);
     unsafe { dst.set_len(dst_max_len) };
@@ -17,11 +17,11 @@ pub fn compress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Error> {
 pub fn compress_into(
     src: &[u8],
     dst: &mut [MaybeUninit<u8>],
-    context: &mut Context,
+    context: &mut CContext,
 ) -> Result<usize, Error> {
     let status = unsafe {
         blosc2_sys::blosc2_compress_ctx(
-            context.0.as_ptr(),
+            context.0.0.as_ptr(),
             src.as_ptr().cast(),
             src.len() as _,
             dst.as_mut_ptr().cast(),
@@ -41,7 +41,7 @@ pub fn compress_into(
     }
 }
 
-pub fn decompress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Error> {
+pub fn decompress(src: &[u8], context: &mut DContext) -> Result<Vec<u8>, Error> {
     if src.len() < blosc2_sys::BLOSC_MIN_HEADER_LENGTH as usize {
         return Err(Error::ReadBuffer);
     }
@@ -75,11 +75,11 @@ pub fn decompress(src: &[u8], context: &mut Context) -> Result<Vec<u8>, Error> {
 pub fn decompress_into(
     src: &[u8],
     dst: &mut [MaybeUninit<u8>],
-    context: &mut Context,
+    context: &mut DContext,
 ) -> Result<usize, Error> {
     let status = unsafe {
         blosc2_sys::blosc2_decompress_ctx(
-            context.0.as_ptr(),
+            context.0.0.as_ptr(),
             src.as_ptr().cast(),
             src.len() as _,
             dst.as_mut_ptr().cast(),
@@ -262,20 +262,28 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[derive(Debug)]
-pub struct Context(NonNull<blosc2_sys::blosc2_context>);
-impl Context {
-    pub fn new_compress(params: CParams) -> Option<Self> {
-        let ctx = unsafe { blosc2_sys::blosc2_create_cctx(params.0) };
-        Some(Context(NonNull::new(ctx)?))
-    }
-    pub fn new_decompress(params: DParams) -> Option<Self> {
-        let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
-        Some(Context(NonNull::new(ctx)?))
-    }
-}
+struct Context(NonNull<blosc2_sys::blosc2_context>);
 impl Drop for Context {
     fn drop(&mut self) {
         unsafe { blosc2_sys::blosc2_free_ctx(self.0.as_ptr()) }
+    }
+}
+#[derive(Debug)]
+pub struct CContext(Context);
+impl CContext {
+    pub fn new(params: CParams) -> Result<Self, Error> {
+        let ctx = unsafe { blosc2_sys::blosc2_create_cctx(params.0) };
+        let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
+        Ok(Self(Context(ctx)))
+    }
+}
+#[derive(Debug)]
+pub struct DContext(Context);
+impl DContext {
+    pub fn new(params: DParams) -> Result<Self, Error> {
+        let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
+        let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
+        Ok(Self(Context(ctx)))
     }
 }
 
@@ -283,60 +291,40 @@ impl Drop for Context {
 pub struct CParams(blosc2_sys::blosc2_cparams);
 impl Default for CParams {
     fn default() -> Self {
-        Self(blosc2_sys::blosc2_cparams {
-            compcode: blosc2_sys::BLOSC_BLOSCLZ as _,
-            compcode_meta: 0,
-            clevel: 5,
-            use_dict: 0,
-            typesize: 8,
-            nthreads: 1,
-            blocksize: 0,
-            splitmode: SplitMode::ForwardCompat as _,
-            schunk: std::ptr::null_mut(),
-            filters: [0, 0, 0, 0, 0, blosc2_sys::BLOSC_SHUFFLE as _],
-            filters_meta: [0, 0, 0, 0, 0, 0],
-            prefilter: None,
-            preparams: std::ptr::null_mut(),
-            tuner_params: std::ptr::null_mut(),
-            tuner_id: 0,
-            instr_codec: false,
-            codec_params: std::ptr::null_mut(),
-            filter_params: [std::ptr::null_mut(); 6],
-        })
+        Self(unsafe { blosc2_sys::blosc2_get_blosc2_cparams_defaults() })
     }
 }
 impl CParams {
-    #[must_use]
     pub fn compressor(&mut self, compressor: CompressAlgo) -> &mut Self {
         self.0.compcode = compressor as _;
         self
     }
-    #[must_use]
     pub fn clevel(&mut self, clevel: u32) -> &mut Self {
         self.0.clevel = clevel as u8;
         self
     }
-    #[must_use]
     pub fn typesize(&mut self, typesize: usize) -> &mut Self {
         self.0.typesize = typesize as i32;
         self
     }
-    #[must_use]
+    pub fn typesize_of<T>(&mut self) -> &mut Self {
+        self.typesize(std::mem::size_of::<T>())
+    }
+    pub fn typesize_of_val<T>(&mut self, val: &T) -> &mut Self {
+        self.typesize(std::mem::size_of_val(val))
+    }
     pub fn nthreads(&mut self, nthreads: usize) -> &mut Self {
         self.0.nthreads = nthreads as i16;
         self
     }
-    #[must_use]
     pub fn blocksize(&mut self, blocksize: usize) -> &mut Self {
         self.0.blocksize = blocksize as i32;
         self
     }
-    #[must_use]
     pub fn splitmode(&mut self, splitmode: SplitMode) -> &mut Self {
         self.0.splitmode = splitmode as _;
         self
     }
-    #[must_use]
     pub fn filters(&mut self, filters: &[Filter]) -> Result<&mut Self, Error> {
         if filters.len() > 6 {
             return Err(Error::InvalidParam);
@@ -348,7 +336,7 @@ impl CParams {
                 Filter::Shuffle => (blosc2_sys::BLOSC_SHUFFLE, 0),
                 Filter::BitShuffle => (blosc2_sys::BLOSC_BITSHUFFLE, 0),
                 Filter::Delta => (blosc2_sys::BLOSC_DELTA, 0),
-                Filter::TruncPrecision(prec_bits) => {
+                Filter::TruncPrecision { prec_bits } => {
                     (blosc2_sys::BLOSC_TRUNC_PREC, *prec_bits as u8)
                 }
             };
@@ -373,9 +361,11 @@ pub enum Filter {
     Shuffle,
     BitShuffle,
     Delta,
-    // Positive values of prec_bits will set absolute precision bits, whereas negative
-    // values will reduce the precision bits (similar to Python slicing convention).
-    TruncPrecision(i8),
+    TruncPrecision {
+        // Positive value will set absolute precision bits, whereas negative
+        // value will reduce the precision bits (similar to Python slicing convention).
+        prec_bits: i8,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -390,16 +380,10 @@ pub enum SplitMode {
 pub struct DParams(blosc2_sys::blosc2_dparams);
 impl Default for DParams {
     fn default() -> Self {
-        Self(blosc2_sys::blosc2_dparams {
-            nthreads: 1,
-            schunk: std::ptr::null_mut(),
-            postfilter: None,
-            postparams: std::ptr::null_mut(),
-        })
+        Self(unsafe { blosc2_sys::blosc2_get_blosc2_dparams_defaults() })
     }
 }
 impl DParams {
-    #[must_use]
     pub fn nthreads(&mut self, nthreads: usize) -> &mut Self {
         self.0.nthreads = nthreads as i16;
         self
@@ -424,12 +408,17 @@ unsafe fn strlen(s: *const ::core::ffi::c_char) -> usize {
     len
 }
 
+// BLOSC2_VERSION_STRING
+// TODO: -dev suffix
+
+// blosc2_get_complib_info
+
 #[cfg(test)]
 mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    use crate::{CParams, Context};
+    use crate::{CContext, CParams, DContext};
 
     #[test]
     fn round_trip() {
@@ -445,15 +434,12 @@ mod tests {
                 .map(|_| rand.random_range(0..=255) as u8)
                 .collect::<Vec<u8>>();
 
-            let compressed = crate::compress(
-                &src,
-                &mut Context::new_compress(CParams::default()).unwrap(),
-            )
-            .unwrap();
+            let compressed =
+                crate::compress(&src, &mut CContext::new(CParams::default()).unwrap()).unwrap();
 
             let decompressed = crate::decompress(
                 &compressed,
-                &mut Context::new_decompress(crate::DParams::default()).unwrap(),
+                &mut DContext::new(crate::DParams::default()).unwrap(),
             )
             .unwrap();
             assert_eq!(src, decompressed);

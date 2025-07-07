@@ -21,7 +21,7 @@ mod tests {
         unsafe {
             crate::blosc2_compress(
                 6,
-                crate::blosc_filter_code::BLOSC_SHUFFLE as i32,
+                crate::BLOSC_SHUFFLE as i32,
                 1,
                 data.as_ptr() as *const core::ffi::c_void,
                 data.len() as i32,
