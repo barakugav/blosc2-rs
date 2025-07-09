@@ -50,10 +50,23 @@ impl<'a> CowBytes<'a> {
         }
     }
 
-    pub fn into_vec(self) -> Vec<u8> {
+    pub fn into_owned(self) -> Vec<u8> {
         match self {
             Self::OwnedRust(vec) => vec,
             Self::Borrowed(_) | Self::OwnedFfi(_) => self.as_slice().to_vec(),
+        }
+    }
+
+    pub fn to_mut(&mut self) -> &mut Vec<u8> {
+        match self {
+            Self::OwnedRust(vec) => vec,
+            Self::OwnedFfi(_) | Self::Borrowed(_) => {
+                *self = Self::OwnedRust(self.as_slice().to_vec());
+                match self {
+                    Self::OwnedRust(vec) => vec,
+                    _ => unreachable!(),
+                }
+            }
         }
     }
 }
@@ -73,11 +86,10 @@ impl<'a> From<&'a [u8]> for CowBytes<'a> {
         Self::Borrowed(value)
     }
 }
-
-pub(crate) fn path2cstr(path: &Path) -> CString {
-    path.to_str()
-        .and_then(|p| CString::new(p).ok())
-        .expect("failed to convert path to cstr")
+impl<'a> AsRef<[u8]> for CowBytes<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.as_slice()
+    }
 }
 
 pub(crate) fn validate_compressed_buf_and_get_sizes(src: &[u8]) -> Result<(i32, i32, i32), Error> {
@@ -98,4 +110,10 @@ pub(crate) fn validate_compressed_buf_and_get_sizes(src: &[u8]) -> Result<(i32, 
         unsafe { cbytes.assume_init() },
         unsafe { blocksize.assume_init() },
     ))
+}
+
+pub(crate) fn path2cstr(path: &Path) -> CString {
+    path.to_str()
+        .and_then(|p| CString::new(p).ok())
+        .expect("failed to convert path to cstr")
 }

@@ -10,83 +10,6 @@ use std::ptr::NonNull;
 use crate::error::ErrorCode;
 use crate::util::validate_compressed_buf_and_get_sizes;
 
-pub fn compress(src: &[u8], context: &mut CContext) -> Result<Vec<u8>, Error> {
-    let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
-    let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_max_len);
-    unsafe { dst.set_len(dst_max_len) };
-
-    let len = compress_into(src, dst.as_mut_slice(), context)?;
-    assert!(len <= dst_max_len);
-    unsafe { dst.set_len(len) };
-    // SAFETY: every element from 0 to len was initialized
-    let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) };
-    Ok(vec)
-}
-
-pub fn compress_into(
-    src: &[u8],
-    dst: &mut [MaybeUninit<u8>],
-    context: &mut CContext,
-) -> Result<usize, Error> {
-    let status = unsafe {
-        blosc2_sys::blosc2_compress_ctx(
-            context.0.0.as_ptr(),
-            src.as_ptr().cast(),
-            src.len() as _,
-            dst.as_mut_ptr().cast(),
-            dst.len() as _,
-        )
-    };
-    match status {
-        len if len > 0 => {
-            debug_assert!(len as usize <= dst.len());
-            Ok(len as usize)
-        }
-        0 => Err(Error::WriteBuffer),
-        _ => {
-            debug_assert!(status < 0);
-            Err(Error::from_int(status))
-        }
-    }
-}
-
-pub fn decompress(src: &[u8], context: &mut DContext) -> Result<Vec<u8>, Error> {
-    if src.len() < blosc2_sys::BLOSC_MIN_HEADER_LENGTH as usize {
-        return Err(Error::ReadBuffer);
-    }
-    let (nbytes, _cbytes, _blocksize) = validate_compressed_buf_and_get_sizes(src)?;
-    let dst_len = nbytes as usize;
-
-    let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_len);
-    unsafe { dst.set_len(dst_len) };
-    let len = decompress_into(src, dst.as_mut_slice(), context)?;
-
-    assert!(len <= dst_len);
-    unsafe { dst.set_len(len) };
-    // SAFETY: every element from 0 to len was initialized
-    let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) };
-    Ok(vec)
-}
-
-pub fn decompress_into(
-    src: &[u8],
-    dst: &mut [MaybeUninit<u8>],
-    context: &mut DContext,
-) -> Result<usize, Error> {
-    let len = unsafe {
-        blosc2_sys::blosc2_decompress_ctx(
-            context.0.0.as_ptr(),
-            src.as_ptr().cast(),
-            src.len() as _,
-            dst.as_mut_ptr().cast(),
-            dst.len() as _,
-        )
-        .into_result()? as usize
-    };
-    debug_assert!(len <= dst.len());
-    Ok(len)
-}
-
 #[derive(Debug)]
 struct Context(NonNull<blosc2_sys::blosc2_context>);
 impl Drop for Context {
@@ -95,21 +18,98 @@ impl Drop for Context {
     }
 }
 #[derive(Debug)]
-pub struct CContext(Context);
-impl CContext {
+pub struct Encoder(Context);
+impl Encoder {
     pub fn new(params: CParams) -> Result<Self, Error> {
         let ctx = unsafe { blosc2_sys::blosc2_create_cctx(params.0) };
         let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
         Ok(Self(Context(ctx)))
     }
+
+    pub fn compress(&mut self, src: &[u8]) -> Result<Vec<u8>, Error> {
+        let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
+        let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_max_len);
+        unsafe { dst.set_len(dst_max_len) };
+
+        let len = self.compress_into(src, dst.as_mut_slice())?;
+        assert!(len <= dst_max_len);
+        unsafe { dst.set_len(len) };
+        // SAFETY: every element from 0 to len was initialized
+        let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) };
+        Ok(vec)
+    }
+
+    pub fn compress_into(
+        &mut self,
+        src: &[u8],
+        dst: &mut [MaybeUninit<u8>],
+    ) -> Result<usize, Error> {
+        let status = unsafe {
+            blosc2_sys::blosc2_compress_ctx(
+                self.0.0.as_ptr(),
+                src.as_ptr().cast(),
+                src.len() as _,
+                dst.as_mut_ptr().cast(),
+                dst.len() as _,
+            )
+        };
+        match status {
+            len if len > 0 => {
+                debug_assert!(len as usize <= dst.len());
+                Ok(len as usize)
+            }
+            0 => Err(Error::WriteBuffer),
+            _ => {
+                debug_assert!(status < 0);
+                Err(Error::from_int(status))
+            }
+        }
+    }
 }
 #[derive(Debug)]
-pub struct DContext(Context);
-impl DContext {
+pub struct Decoder(Context);
+impl Decoder {
     pub fn new(params: DParams) -> Result<Self, Error> {
         let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
         let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
         Ok(Self(Context(ctx)))
+    }
+
+    pub fn decompress(&mut self, src: &[u8]) -> Result<Vec<u8>, Error> {
+        if src.len() < blosc2_sys::BLOSC_MIN_HEADER_LENGTH as usize {
+            return Err(Error::ReadBuffer);
+        }
+        let (nbytes, _cbytes, _blocksize) = validate_compressed_buf_and_get_sizes(src)?;
+        let dst_len = nbytes as usize;
+
+        let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_len);
+        unsafe { dst.set_len(dst_len) };
+        let len = self.decompress_into(src, dst.as_mut_slice())?;
+
+        assert!(len <= dst_len);
+        unsafe { dst.set_len(len) };
+        // SAFETY: every element from 0 to len was initialized
+        let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) };
+        Ok(vec)
+    }
+
+    pub fn decompress_into(
+        &mut self,
+        src: &[u8],
+        dst: &mut [MaybeUninit<u8>],
+    ) -> Result<usize, Error> {
+        let len = unsafe {
+            blosc2_sys::blosc2_decompress_ctx(
+                self.0.0.as_ptr(),
+                src.as_ptr().cast(),
+                src.len() as _,
+                dst.as_mut_ptr().cast(),
+                dst.len() as _,
+            )
+            .into_result()? as usize
+        };
+        debug_assert!(len <= dst.len());
+        Ok(len)
     }
 }
 
@@ -244,7 +244,7 @@ mod tests {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    use crate::{CContext, CParams, DContext};
+    use crate::{CParams, DParams};
 
     #[test]
     fn round_trip() {
@@ -260,14 +260,15 @@ mod tests {
                 .map(|_| rand.random_range(0..=255) as u8)
                 .collect::<Vec<u8>>();
 
-            let compressed =
-                crate::compress(&src, &mut CContext::new(CParams::default()).unwrap()).unwrap();
+            let compressed = crate::Encoder::new(CParams::default())
+                .unwrap()
+                .compress(&src)
+                .unwrap();
 
-            let decompressed = crate::decompress(
-                &compressed,
-                &mut DContext::new(crate::DParams::default()).unwrap(),
-            )
-            .unwrap();
+            let decompressed = crate::Decoder::new(DParams::default())
+                .unwrap()
+                .decompress(&compressed)
+                .unwrap();
             assert_eq!(src, decompressed);
         }
     }

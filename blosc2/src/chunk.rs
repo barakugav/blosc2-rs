@@ -5,7 +5,7 @@ use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
 use crate::util::{CowBytes, path2cstr, validate_compressed_buf_and_get_sizes};
-use crate::{CParams, DContext, DParams, Error};
+use crate::{CParams, DParams, Error};
 
 pub struct SChunk<'a>(NonNull<blosc2_sys::blosc2_schunk>, PhantomData<&'a ()>);
 impl<'a> SChunk<'a> {
@@ -130,7 +130,7 @@ impl<'a> SChunk<'a> {
         unsafe {
             blosc2_sys::blosc2_schunk_append_chunk(
                 self.0.as_ptr(),
-                chunk.compressed_bytes().as_ptr().cast_mut(),
+                chunk.as_bytes().as_ptr().cast_mut(),
                 copy,
             )
             .into_result()?;
@@ -156,7 +156,7 @@ impl<'a> SChunk<'a> {
             blosc2_sys::blosc2_schunk_update_chunk(
                 self.0.as_ptr(),
                 index as _,
-                chunk.compressed_bytes().as_ptr().cast_mut(),
+                chunk.as_bytes().as_ptr().cast_mut(),
                 copy,
             )
             .into_result()?;
@@ -182,7 +182,7 @@ impl<'a> SChunk<'a> {
             blosc2_sys::blosc2_schunk_insert_chunk(
                 self.0.as_ptr(),
                 index as _,
-                chunk.compressed_bytes().as_ptr().cast_mut(),
+                chunk.as_bytes().as_ptr().cast_mut(),
                 copy,
             )
             .into_result()?;
@@ -212,7 +212,7 @@ impl<'a> SChunk<'a> {
         let ptr = NonNull::new(unsafe { ptr.assume_init() }).ok_or(Error::Failure)?;
         let needs_free = unsafe { needs_free.assume_init() };
         let buf = unsafe { CowBytes::from_c_buf(ptr, len, needs_free) };
-        let mut chunk = Chunk::new(buf)?;
+        let mut chunk = Chunk::from_compressed(buf)?;
         chunk.schunk = Some(self);
         Ok(chunk)
     }
@@ -252,18 +252,32 @@ pub struct Chunk<'a> {
     schunk: Option<&'a SChunk<'a>>,
 }
 impl<'a> Chunk<'a> {
-    pub fn new(compressed_buffer: CowBytes<'a>) -> Result<Self, Error> {
-        // validate, dont care about the sizes
-        validate_compressed_buf_and_get_sizes(compressed_buffer.as_slice())?;
-
+    pub fn from_data(data: &[u8]) -> Result<Self, Error> {
+        let buffer = crate::Encoder::new(Default::default())?
+            .compress(data)?
+            .into();
         Ok(Self {
-            buffer: compressed_buffer,
+            buffer,
             schunk: None,
         })
     }
 
-    pub fn compressed_bytes(&self) -> &[u8] {
+    pub fn from_compressed(bytes: CowBytes<'a>) -> Result<Self, Error> {
+        // validate, dont care about the sizes
+        validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
+
+        Ok(Self {
+            buffer: bytes,
+            schunk: None,
+        })
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
         self.buffer.as_slice()
+    }
+
+    pub fn into_bytes(self) -> CowBytes<'a> {
+        self.buffer
     }
 
     pub fn decompress(&self) -> Result<Vec<u8>, Error> {
@@ -272,6 +286,6 @@ impl<'a> Chunk<'a> {
             .as_ref()
             .map(|schunk| DParams(unsafe { *schunk.0.as_ref().storage.as_ref().unwrap().dparams }))
             .unwrap_or_default();
-        crate::decompress(self.buffer.as_slice(), &mut DContext::new(dparams)?)
+        crate::Decoder::new(dparams)?.decompress(self.buffer.as_slice())
     }
 }
