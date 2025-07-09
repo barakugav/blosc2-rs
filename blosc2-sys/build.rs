@@ -22,6 +22,8 @@ fn generate_bindings() {
         .opaque_type("blosc_timestamp_t")
         .blocklist_item("BLOSC2_CPARAMS_DEFAULTS")
         .blocklist_item("BLOSC2_DPARAMS_DEFAULTS")
+        .blocklist_item("BLOSC2_IO_DEFAULTS")
+        .blocklist_item("BLOSC2_STORAGE_DEFAULTS")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
     let bindings = builder.generate().expect("Failed to generate bindings");
 

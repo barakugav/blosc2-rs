@@ -163,3 +163,22 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+pub(crate) trait ErrorCode: Sized {
+    fn into_result(self) -> Result<Self, Error>;
+}
+macro_rules! impl_status_check {
+    ($t:ty) => {
+        impl ErrorCode for $t {
+            fn into_result(self) -> Result<Self, Error> {
+                if self < 0 {
+                    Err(Error::from_int(self as _))
+                } else {
+                    Ok(self)
+                }
+            }
+        }
+    };
+}
+impl_status_check!(i32);
+impl_status_check!(i64);

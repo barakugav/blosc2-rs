@@ -1,8 +1,14 @@
 mod error;
 pub use error::Error;
 
+mod chunk;
+mod util;
+
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
+
+use crate::error::ErrorCode;
+use crate::util::validate_compressed_buf_and_get_sizes;
 
 pub fn compress(src: &[u8], context: &mut CContext) -> Result<Vec<u8>, Error> {
     let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
@@ -48,21 +54,8 @@ pub fn decompress(src: &[u8], context: &mut DContext) -> Result<Vec<u8>, Error> 
     if src.len() < blosc2_sys::BLOSC_MIN_HEADER_LENGTH as usize {
         return Err(Error::ReadBuffer);
     }
-    let mut nbytes = MaybeUninit::uninit();
-    let mut cbytes = MaybeUninit::uninit();
-    let mut blocksize = MaybeUninit::uninit();
-    let status = unsafe {
-        blosc2_sys::blosc2_cbuffer_sizes(
-            src.as_ptr().cast(),
-            &mut nbytes as *mut MaybeUninit<i32> as *mut i32,
-            &mut cbytes as *mut MaybeUninit<i32> as *mut i32,
-            &mut blocksize as *mut MaybeUninit<i32> as *mut i32,
-        )
-    };
-    if status < 0 {
-        return Err(Error::from_int(status));
-    }
-    let dst_len = unsafe { nbytes.assume_init() } as usize;
+    let (nbytes, _cbytes, _blocksize) = validate_compressed_buf_and_get_sizes(src)?;
+    let dst_len = nbytes as usize;
 
     let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_len);
     unsafe { dst.set_len(dst_len) };
@@ -80,7 +73,7 @@ pub fn decompress_into(
     dst: &mut [MaybeUninit<u8>],
     context: &mut DContext,
 ) -> Result<usize, Error> {
-    let status = unsafe {
+    let len = unsafe {
         blosc2_sys::blosc2_decompress_ctx(
             context.0.0.as_ptr(),
             src.as_ptr().cast(),
@@ -88,14 +81,10 @@ pub fn decompress_into(
             dst.as_mut_ptr().cast(),
             dst.len() as _,
         )
+        .into_result()? as usize
     };
-    match status {
-        len if len >= 0 => {
-            debug_assert!(len as usize <= dst.len());
-            Ok(len as usize)
-        }
-        _ => Err(Error::from_int(status)),
-    }
+    debug_assert!(len <= dst.len());
+    Ok(len)
 }
 
 #[derive(Debug)]
@@ -125,7 +114,7 @@ impl DContext {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct CParams(blosc2_sys::blosc2_cparams);
+pub struct CParams(pub(crate) blosc2_sys::blosc2_cparams);
 impl Default for CParams {
     fn default() -> Self {
         Self(unsafe { blosc2_sys::blosc2_get_blosc2_cparams_defaults() })
@@ -214,7 +203,7 @@ pub enum SplitMode {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct DParams(blosc2_sys::blosc2_dparams);
+pub struct DParams(pub(crate) blosc2_sys::blosc2_dparams);
 impl Default for DParams {
     fn default() -> Self {
         Self(unsafe { blosc2_sys::blosc2_get_blosc2_dparams_defaults() })

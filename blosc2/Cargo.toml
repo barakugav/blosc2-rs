@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 blosc2-sys = { package = "blosc2-rs-sys", path = "../blosc2-sys" }
+libc = "0.2"
 
 [dev-dependencies]
 rand = "0.9"
