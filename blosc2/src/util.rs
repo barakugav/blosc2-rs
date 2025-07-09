@@ -6,58 +6,69 @@ use std::ptr::NonNull;
 use crate::Error;
 use crate::error::ErrorCode;
 
-pub struct FfiBytes {
-    ptr: NonNull<u8>,
+pub struct FfiVec<T> {
+    ptr: NonNull<T>,
     len: usize,
 }
-impl FfiBytes {
-    pub unsafe fn new(ptr: NonNull<u8>, len: usize) -> Self {
+impl<T> FfiVec<T> {
+    pub unsafe fn new(ptr: NonNull<T>, len: usize) -> Self {
         Self { ptr, len }
     }
 
-    pub fn copy_of(src: &[u8]) -> Self {
-        let len = src.len();
-        let ptr = unsafe { libc::malloc(len) };
-        let ptr = NonNull::new(ptr as *mut u8).unwrap();
-        let mut self_ = Self { ptr, len };
-        self_.as_mut_slice().copy_from_slice(src);
-        self_
-    }
-
-    pub fn as_slice(&self) -> &[u8] {
+    pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
-    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
 }
-impl Drop for FfiBytes {
+impl<T> Drop for FfiVec<T> {
     fn drop(&mut self) {
+        unsafe { std::ptr::drop_in_place(self.as_mut_slice()) };
         unsafe { libc::free(self.ptr.as_ptr().cast()) };
     }
 }
-impl Clone for FfiBytes {
+impl FfiVec<u8> {
+    pub fn copy_of(buf: &[u8]) -> Self {
+        let ptr = unsafe { libc::malloc(buf.len()) };
+        let ptr = NonNull::new(ptr as *mut u8).unwrap();
+        let mut vec = Self {
+            ptr,
+            len: buf.len(),
+        };
+        vec.as_mut_slice().copy_from_slice(buf);
+        vec
+    }
+}
+impl Clone for FfiVec<u8> {
     fn clone(&self) -> Self {
         Self::copy_of(self.as_slice())
     }
 }
-
-#[derive(Clone)]
-pub enum CowBytes<'a> {
-    OwnedRust(Vec<u8>),
-    OwnedFfi(FfiBytes),
-    Borrowed(&'a [u8]),
+impl<T> std::fmt::Debug for FfiVec<T>
+where
+    T: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(self.as_slice(), f)
+    }
 }
-impl<'a> CowBytes<'a> {
-    pub(crate) unsafe fn from_c_buf(ptr: NonNull<u8>, len: usize, needs_free: bool) -> Self {
+
+pub enum CowVec<'a, T> {
+    OwnedRust(Vec<T>),
+    OwnedFfi(FfiVec<T>),
+    Borrowed(&'a [T]),
+}
+impl<'a, T> CowVec<'a, T> {
+    pub(crate) unsafe fn from_c_buf(ptr: NonNull<T>, len: usize, needs_free: bool) -> Self {
         if needs_free {
-            Self::OwnedFfi(FfiBytes { ptr, len })
+            Self::OwnedFfi(FfiVec { ptr, len })
         } else {
             Self::Borrowed(unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) })
         }
     }
 
-    pub fn as_slice(&self) -> &[u8] {
+    pub fn as_slice(&self) -> &[T] {
         match self {
             Self::OwnedRust(vec) => vec.as_slice(),
             Self::OwnedFfi(bytes) => bytes.as_slice(),
@@ -65,55 +76,51 @@ impl<'a> CowBytes<'a> {
         }
     }
 
-    pub fn into_owned(self) -> Vec<u8> {
+    pub fn into_vec(self) -> Vec<T>
+    where
+        T: Clone,
+    {
         match self {
             Self::OwnedRust(vec) => vec,
             Self::Borrowed(_) | Self::OwnedFfi(_) => self.as_slice().to_vec(),
         }
     }
-
-    pub fn to_mut(&mut self) -> &mut Vec<u8> {
-        match self {
-            Self::OwnedRust(vec) => vec,
-            Self::OwnedFfi(_) | Self::Borrowed(_) => {
-                *self = Self::OwnedRust(self.as_slice().to_vec());
-                match self {
-                    Self::OwnedRust(vec) => vec,
-                    _ => unreachable!(),
-                }
-            }
-        }
-    }
-
-    pub fn shallow_clone(&self) -> CowBytes {
-        CowBytes::Borrowed(self.as_slice())
-    }
 }
 
-impl<'a> From<Vec<u8>> for CowBytes<'a> {
-    fn from(value: Vec<u8>) -> Self {
+impl<'a, T> From<Vec<T>> for CowVec<'a, T> {
+    fn from(value: Vec<T>) -> Self {
         Self::OwnedRust(value)
     }
 }
-impl<'a> From<FfiBytes> for CowBytes<'a> {
-    fn from(value: FfiBytes) -> Self {
+impl<'a, T> From<FfiVec<T>> for CowVec<'a, T> {
+    fn from(value: FfiVec<T>) -> Self {
         Self::OwnedFfi(value)
     }
 }
-impl<'a> From<&'a [u8]> for CowBytes<'a> {
-    fn from(value: &'a [u8]) -> Self {
+impl<'a, T> From<&'a [T]> for CowVec<'a, T> {
+    fn from(value: &'a [T]) -> Self {
         Self::Borrowed(value)
     }
 }
-impl<'a> AsRef<[u8]> for CowBytes<'a> {
-    fn as_ref(&self) -> &[u8] {
+impl<'a, T> AsRef<[T]> for CowVec<'a, T> {
+    fn as_ref(&self) -> &[T] {
         self.as_slice()
     }
 }
 
-pub(crate) struct BytesMaybePassOwnershipToC<'a>(ManuallyDrop<CowBytes<'a>>);
+impl Clone for CowVec<'_, u8> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::OwnedRust(vec) => Self::OwnedRust(vec.clone()),
+            Self::OwnedFfi(ffi_vec) => Self::OwnedFfi(ffi_vec.clone()),
+            Self::Borrowed(slice) => Self::Borrowed(slice),
+        }
+    }
+}
+
+pub(crate) struct BytesMaybePassOwnershipToC<'a>(ManuallyDrop<CowVec<'a, u8>>);
 impl<'a> BytesMaybePassOwnershipToC<'a> {
-    pub(crate) fn new(bytes: CowBytes<'a>) -> Self {
+    pub(crate) fn new(bytes: CowVec<'a, u8>) -> Self {
         Self(ManuallyDrop::new(bytes))
     }
     pub(crate) fn as_slice(&self) -> &[u8] {
@@ -121,8 +128,8 @@ impl<'a> BytesMaybePassOwnershipToC<'a> {
     }
     pub(crate) fn ownership_moved(&self) -> bool {
         match &*self.0 {
-            CowBytes::Borrowed(_) | CowBytes::OwnedRust(_) => false,
-            CowBytes::OwnedFfi(_) => true, // We move the ownership of the C allocated buffer to the C library
+            CowVec::Borrowed(_) | CowVec::OwnedRust(_) => false,
+            CowVec::OwnedFfi(_) => true, // We move the ownership of the C allocated buffer to the C library
         }
     }
 }
@@ -164,15 +171,23 @@ pub(crate) fn path2cstr(path: &Path) -> CString {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::num::NonZeroUsize;
+
     use rand::distr::weighted::WeightedIndex;
     use rand::prelude::*;
 
-    pub(crate) fn rand_src_len(rand: &mut StdRng) -> usize {
+    use crate::{CParams, CompressAlgo, DParams, Filter, SplitMode};
+
+    pub(crate) fn rand_src_len(typesize: usize, rand: &mut StdRng) -> usize {
+        if typesize == 0 {
+            return 0;
+        }
+
         let (max_lens, weights): (Vec<_>, Vec<_>) = [
             (0x1, 1),
             (0x10, 4),
-            (0x100, 8),
-            (0x1000, 16),
+            (0x100, 64),
+            (0x1000, 64),
             (0x10000, 4),
             (0x100000, 1),
         ]
@@ -180,6 +195,108 @@ pub(crate) mod tests {
         .unzip();
         let dist = WeightedIndex::new(&weights).unwrap();
         let max_len = max_lens[dist.sample(rand)];
-        rand.random_range(0..=max_len)
+        let len = rand.random_range(0..=max_len);
+        ceil_to_multiple(len, typesize)
+    }
+
+    pub(crate) fn rand_cparams(rand: &mut StdRng) -> CParams {
+        rand_cparams2(false, rand)
+    }
+
+    pub(crate) fn rand_cparams2(lossy: bool, rand: &mut StdRng) -> CParams {
+        let mut params = CParams::default();
+
+        let compressors = [
+            None,
+            Some(CompressAlgo::Blosclz),
+            Some(CompressAlgo::Lz4),
+            Some(CompressAlgo::Lz4hc),
+            Some(CompressAlgo::Zlib),
+            Some(CompressAlgo::Zstd),
+        ];
+        if let Some(compressor) = compressors.choose(rand).unwrap() {
+            params.compressor(compressor.clone());
+        }
+
+        let levels = [None, Some(rand.random_range(0..=9))];
+        if let Some(clevel) = levels.choose(rand).unwrap() {
+            params.clevel(*clevel);
+        }
+
+        let typesizes = [None, Some(4), Some(8), Some(rand.random_range(1..=64))];
+        if let Some(typesize) = typesizes.choose(rand).unwrap() {
+            params.typesize(NonZeroUsize::new(*typesize).unwrap());
+        }
+
+        let nthreads = [None, Some(rand.random_range(0..=64))];
+        if let Some(nthreads) = nthreads.choose(rand).unwrap() {
+            params.nthreads(*nthreads);
+        }
+
+        let blocksizes = [
+            None,
+            Some(None),
+            Some(Some(rand.random_range(1..=64))),
+            Some(Some(1024)),
+            Some(Some(32 * 1024)),
+            Some(Some(512 * 1024)),
+            Some(Some(4 * 1024 * 1024)),
+        ];
+        if let Some(blocksize) = blocksizes.choose(rand).unwrap() {
+            params.blocksize(*blocksize);
+        }
+
+        let splitmodes = [
+            None,
+            Some(SplitMode::Auto),
+            Some(SplitMode::Always),
+            Some(SplitMode::Never),
+            Some(SplitMode::ForwardCompat),
+        ];
+        if let Some(splitmode) = splitmodes.choose(rand).unwrap() {
+            params.splitmode(*splitmode);
+        }
+
+        let mut basic_filters = vec![Filter::Shuffle, Filter::BitShuffle, Filter::Delta];
+        if lossy && [4, 8].contains(&params.get_typesize().get()) {
+            basic_filters.push(Filter::TruncPrecision {
+                prec_bits: rand.random_range(0..=10),
+            });
+        }
+        let filters = [Filter::Shuffle]
+            .iter()
+            .map(|f| Some(vec![f.clone()]))
+            .chain([None, Some(Vec::new()), {
+                let max_filter_num = 2; // TODO: should be 6
+                let mut basic_filters = basic_filters.clone();
+                basic_filters.shuffle(rand);
+                let filters = basic_filters
+                    .into_iter()
+                    .take(rand.random_range(2..=max_filter_num))
+                    .collect();
+                Some(filters)
+            }])
+            .collect::<Vec<_>>();
+        if let Some(filter) = filters.choose(rand).unwrap() {
+            params.filters(filter).unwrap();
+        }
+
+        params
+    }
+
+    pub(crate) fn rand_dparams(rand: &mut StdRng) -> DParams {
+        let mut params = DParams::default();
+
+        let nthreads = [None, Some(rand.random_range(0..=2))];
+        if let Some(nthreads) = nthreads.choose(rand).unwrap() {
+            params.nthreads(*nthreads);
+        }
+
+        params
+    }
+
+    pub(crate) fn ceil_to_multiple(x: usize, m: usize) -> usize {
+        assert!(m > 0);
+        x.div_ceil(m) * m
     }
 }

@@ -7,9 +7,14 @@ mod error;
 pub use error::Error;
 
 mod chunk;
+mod global;
 mod util;
 
+mod tracing;
+pub(crate) use tracing::trace;
+
 use std::mem::MaybeUninit;
+use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
@@ -115,7 +120,7 @@ impl Decoder {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct CParams(pub(crate) blosc2_sys::blosc2_cparams);
 impl Default for CParams {
     fn default() -> Self {
@@ -127,35 +132,76 @@ impl CParams {
         self.0.compcode = compressor as _;
         self
     }
+    pub fn get_compressor(&self) -> CompressAlgo {
+        match self.0.compcode as u32 {
+            blosc2_sys::BLOSC_BLOSCLZ => CompressAlgo::Blosclz,
+            blosc2_sys::BLOSC_LZ4 => CompressAlgo::Lz4,
+            blosc2_sys::BLOSC_LZ4HC => CompressAlgo::Lz4hc,
+            blosc2_sys::BLOSC_ZLIB => CompressAlgo::Zlib,
+            blosc2_sys::BLOSC_ZSTD => CompressAlgo::Zstd,
+            unknown_code => panic!("Unknown compressor code: {unknown_code}"),
+        }
+    }
+
     pub fn clevel(&mut self, clevel: u32) -> &mut Self {
         self.0.clevel = clevel as u8;
         self
     }
-    pub fn typesize(&mut self, typesize: usize) -> &mut Self {
-        self.0.typesize = typesize as i32;
+    pub fn get_clevel(&self) -> u32 {
+        self.0.clevel as u32
+    }
+
+    pub fn typesize(&mut self, typesize: NonZeroUsize) -> &mut Self {
+        self.0.typesize = typesize.get() as i32;
         self
     }
-    pub fn typesize_of<T>(&mut self) -> &mut Self {
-        self.typesize(std::mem::size_of::<T>())
+    pub fn get_typesize(&self) -> NonZeroUsize {
+        NonZeroUsize::new(self.0.typesize as usize).unwrap()
     }
-    pub fn typesize_of_val<T>(&mut self, val: &T) -> &mut Self {
-        self.typesize(std::mem::size_of_val(val))
-    }
-    pub fn nthreads(&mut self, nthreads: usize) -> &mut Self {
+
+    pub fn nthreads(&mut self, mut nthreads: usize) -> &mut Self {
+        if nthreads == 0 {
+            nthreads = 1;
+        }
         self.0.nthreads = nthreads as i16;
         self
     }
-    pub fn blocksize(&mut self, blocksize: usize) -> &mut Self {
-        self.0.blocksize = blocksize as i32;
+    pub fn get_nthreads(&self) -> usize {
+        self.0.nthreads as usize
+    }
+
+    pub fn blocksize(&mut self, blocksize: Option<usize>) -> &mut Self {
+        self.0.blocksize = match blocksize {
+            None => 0, // auto
+            Some(0) => 1,
+            Some(blocksize) => blocksize as i32,
+        };
         self
     }
+    pub fn get_blocksize(&self) -> Option<usize> {
+        (self.0.blocksize > 0).then_some(self.0.blocksize as usize)
+    }
+
     pub fn splitmode(&mut self, splitmode: SplitMode) -> &mut Self {
         self.0.splitmode = splitmode as _;
         self
     }
+    pub fn get_splitmode(&self) -> SplitMode {
+        match self.0.splitmode as u32 {
+            blosc2_sys::BLOSC_ALWAYS_SPLIT => SplitMode::Always,
+            blosc2_sys::BLOSC_NEVER_SPLIT => SplitMode::Never,
+            blosc2_sys::BLOSC_AUTO_SPLIT => SplitMode::Auto,
+            blosc2_sys::BLOSC_FORWARD_COMPAT_SPLIT => SplitMode::ForwardCompat,
+            unknown_mode => panic!("Unknown split mode: {unknown_mode}"),
+        }
+    }
+
     pub fn filters(&mut self, filters: &[Filter]) -> Result<&mut Self, Error> {
         if filters.len() > 6 {
             return Err(Error::InvalidParam);
+        }
+        if filters.len() > 2 {
+            println!("Warning, more than two filters was not tested and seems buggy!")
         }
         self.0.filters = [blosc2_sys::BLOSC_NOFILTER as _; 6];
         self.0.filters_meta = [0; 6];
@@ -172,6 +218,37 @@ impl CParams {
             self.0.filters_meta[i] = meta;
         }
         Ok(self)
+    }
+    pub fn get_filters(&self) -> impl Iterator<Item = Filter> {
+        self.0
+            .filters
+            .iter()
+            .zip(self.0.filters_meta)
+            .filter_map(|(f, meta)| {
+                Some(match *f as u32 {
+                    blosc2_sys::BLOSC_NOFILTER => return None,
+                    blosc2_sys::BLOSC_SHUFFLE => Filter::Shuffle,
+                    blosc2_sys::BLOSC_BITSHUFFLE => Filter::BitShuffle,
+                    blosc2_sys::BLOSC_DELTA => Filter::Delta,
+                    blosc2_sys::BLOSC_TRUNC_PREC => Filter::TruncPrecision {
+                        prec_bits: meta as _,
+                    },
+                    unknown_filter => panic!("Unknown filter code: {unknown_filter}"),
+                })
+            })
+    }
+}
+impl std::fmt::Debug for CParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CParams")
+            .field("compressor", &self.get_compressor())
+            .field("clevel", &self.get_clevel())
+            .field("typesize", &self.get_typesize())
+            .field("nthreads", &self.get_nthreads())
+            .field("blocksize", &self.get_blocksize())
+            .field("splitmode", &self.get_splitmode())
+            .field("filters", &self.get_filters().collect::<Vec<_>>())
+            .finish()
     }
 }
 
@@ -204,7 +281,7 @@ pub enum SplitMode {
     ForwardCompat = blosc2_sys::BLOSC_FORWARD_COMPAT_SPLIT as _,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone)]
 pub struct DParams(pub(crate) blosc2_sys::blosc2_dparams);
 impl Default for DParams {
     fn default() -> Self {
@@ -212,13 +289,26 @@ impl Default for DParams {
     }
 }
 impl DParams {
-    pub fn nthreads(&mut self, nthreads: usize) -> &mut Self {
+    pub fn nthreads(&mut self, mut nthreads: usize) -> &mut Self {
+        if nthreads == 0 {
+            nthreads = 1;
+        }
         self.0.nthreads = nthreads as i16;
         self
     }
+    pub fn get_nthreads(&self) -> usize {
+        self.0.nthreads as usize
+    }
+}
+impl std::fmt::Debug for DParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DParams")
+            .field("nthreads", &self.get_nthreads())
+            .finish()
+    }
 }
 
-pub fn list_compressors() -> impl IntoIterator<Item = &'static str> {
+pub fn list_compressors() -> impl Iterator<Item = &'static str> {
     let compressors = unsafe { blosc2_sys::blosc2_list_compressors() };
     let len = unsafe { strlen(compressors) };
     let slice = unsafe { std::slice::from_raw_parts(compressors.cast(), len + 1) };
@@ -245,22 +335,20 @@ unsafe fn strlen(s: *const ::core::ffi::c_char) -> usize {
 mod tests {
     use rand::prelude::*;
 
-    use crate::util::tests::rand_src_len;
-    use crate::{CParams, DParams};
+    use crate::util::tests::{rand_cparams, rand_dparams, rand_src_len};
+    use crate::{Decoder, Encoder};
 
     #[test]
     fn round_trip() {
         let mut rand = StdRng::seed_from_u64(0x83a9228e9af47dec);
         for _ in 0..30 {
-            let src_len = rand_src_len(&mut rand);
+            let cparams = rand_cparams(&mut rand);
+            let src_len = rand_src_len(cparams.get_typesize().get(), &mut rand);
             let src = (&mut rand).random_iter().take(src_len).collect::<Vec<u8>>();
 
-            let compressed = crate::Encoder::new(CParams::default())
-                .unwrap()
-                .compress(&src)
-                .unwrap();
+            let compressed = Encoder::new(cparams).unwrap().compress(&src).unwrap();
 
-            let decompressed = crate::Decoder::new(DParams::default())
+            let decompressed = Decoder::new(rand_dparams(&mut rand))
                 .unwrap()
                 .decompress(&compressed)
                 .unwrap();

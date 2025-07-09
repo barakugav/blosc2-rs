@@ -9,3 +9,4 @@ libc = "0.2"
 
 [dev-dependencies]
 rand = "0.9"
+tempfile = "3.13"
