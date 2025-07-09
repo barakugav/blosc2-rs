@@ -1,5 +1,5 @@
 use std::ffi::CString;
-use std::mem::MaybeUninit;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::path::Path;
 use std::ptr::NonNull;
 
@@ -15,6 +15,15 @@ impl FfiBytes {
         Self { ptr, len }
     }
 
+    pub fn copy_of(src: &[u8]) -> Self {
+        let len = src.len();
+        let ptr = unsafe { libc::malloc(len) };
+        let ptr = NonNull::new(ptr as *mut u8).unwrap();
+        let mut self_ = Self { ptr, len };
+        self_.as_mut_slice().copy_from_slice(src);
+        self_
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
@@ -27,7 +36,13 @@ impl Drop for FfiBytes {
         unsafe { libc::free(self.ptr.as_ptr().cast()) };
     }
 }
+impl Clone for FfiBytes {
+    fn clone(&self) -> Self {
+        Self::copy_of(self.as_slice())
+    }
+}
 
+#[derive(Clone)]
 pub enum CowBytes<'a> {
     OwnedRust(Vec<u8>),
     OwnedFfi(FfiBytes),
@@ -69,6 +84,10 @@ impl<'a> CowBytes<'a> {
             }
         }
     }
+
+    pub fn shallow_clone(&self) -> CowBytes {
+        CowBytes::Borrowed(self.as_slice())
+    }
 }
 
 impl<'a> From<Vec<u8>> for CowBytes<'a> {
@@ -89,6 +108,31 @@ impl<'a> From<&'a [u8]> for CowBytes<'a> {
 impl<'a> AsRef<[u8]> for CowBytes<'a> {
     fn as_ref(&self) -> &[u8] {
         self.as_slice()
+    }
+}
+
+pub(crate) struct BytesMaybePassOwnershipToC<'a>(ManuallyDrop<CowBytes<'a>>);
+impl<'a> BytesMaybePassOwnershipToC<'a> {
+    pub(crate) fn new(bytes: CowBytes<'a>) -> Self {
+        Self(ManuallyDrop::new(bytes))
+    }
+    pub(crate) fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+    pub(crate) fn ownership_moved(&self) -> bool {
+        match &*self.0 {
+            CowBytes::Borrowed(_) | CowBytes::OwnedRust(_) => false,
+            CowBytes::OwnedFfi(_) => true, // We move the ownership of the C allocated buffer to the C library
+        }
+    }
+}
+impl<'a> Drop for BytesMaybePassOwnershipToC<'a> {
+    fn drop(&mut self) {
+        // If we didnt need to copy, the ownership moved to the C library.
+        // Only drop in case we needed to copy the data and therefore we own the data.
+        if !self.ownership_moved() {
+            unsafe { ManuallyDrop::drop(&mut self.0) };
+        }
     }
 }
 
@@ -116,4 +160,26 @@ pub(crate) fn path2cstr(path: &Path) -> CString {
     path.to_str()
         .and_then(|p| CString::new(p).ok())
         .expect("failed to convert path to cstr")
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use rand::distr::weighted::WeightedIndex;
+    use rand::prelude::*;
+
+    pub(crate) fn rand_src_len(rand: &mut StdRng) -> usize {
+        let (max_lens, weights): (Vec<_>, Vec<_>) = [
+            (0x1, 1),
+            (0x10, 4),
+            (0x100, 8),
+            (0x1000, 16),
+            (0x10000, 4),
+            (0x100000, 1),
+        ]
+        .into_iter()
+        .unzip();
+        let dist = WeightedIndex::new(&weights).unwrap();
+        let max_len = max_lens[dist.sample(rand)];
+        rand.random_range(0..=max_len)
+    }
 }

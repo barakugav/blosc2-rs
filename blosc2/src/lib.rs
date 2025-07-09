@@ -1,3 +1,8 @@
+// Set the BLOSC_TRACE environment variable
+//  * for getting more info on what is happening. If the error is not related with
+//  * wrong params, please report it back together with the buffer data causing this,
+//  * as well as the compression params used.
+
 mod error;
 pub use error::Error;
 
@@ -10,14 +15,12 @@ use std::ptr::NonNull;
 use crate::error::ErrorCode;
 use crate::util::validate_compressed_buf_and_get_sizes;
 
-#[derive(Debug)]
 struct Context(NonNull<blosc2_sys::blosc2_context>);
 impl Drop for Context {
     fn drop(&mut self) {
         unsafe { blosc2_sys::blosc2_free_ctx(self.0.as_ptr()) }
     }
 }
-#[derive(Debug)]
 pub struct Encoder(Context);
 impl Encoder {
     pub fn new(params: CParams) -> Result<Self, Error> {
@@ -66,7 +69,6 @@ impl Encoder {
         }
     }
 }
-#[derive(Debug)]
 pub struct Decoder(Context);
 impl Decoder {
     pub fn new(params: DParams) -> Result<Self, Error> {
@@ -241,24 +243,17 @@ unsafe fn strlen(s: *const ::core::ffi::c_char) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use rand::rngs::StdRng;
-    use rand::{Rng, SeedableRng};
+    use rand::prelude::*;
 
+    use crate::util::tests::rand_src_len;
     use crate::{CParams, DParams};
 
     #[test]
     fn round_trip() {
         let mut rand = StdRng::seed_from_u64(0x83a9228e9af47dec);
-
-        for _ in 0..100 {
-            let src_len = {
-                let max_lens = [0x1, 0x10, 0x100, 0x1000, 0x10000, 0x100000];
-                let max_len = max_lens[rand.random_range(0..max_lens.len())];
-                rand.random_range(0..=max_len)
-            };
-            let src = (0..rand.random_range(0..=src_len))
-                .map(|_| rand.random_range(0..=255) as u8)
-                .collect::<Vec<u8>>();
+        for _ in 0..30 {
+            let src_len = rand_src_len(&mut rand);
+            let src = (&mut rand).random_iter().take(src_len).collect::<Vec<u8>>();
 
             let compressed = crate::Encoder::new(CParams::default())
                 .unwrap()

@@ -1,3 +1,8 @@
+// Set the BLOSC_TRACE environment variable
+//  * for getting more info on what is happening. If the error is not related with
+//  * wrong params, please report it back together with the buffer data causing this,
+//  * as well as the compression params used.
+
 mod c_bridge {
     #![allow(dead_code)]
     #![allow(unused_imports)]

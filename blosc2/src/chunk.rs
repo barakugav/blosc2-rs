@@ -1,17 +1,17 @@
-use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
-use crate::util::{CowBytes, path2cstr, validate_compressed_buf_and_get_sizes};
+use crate::util::{
+    BytesMaybePassOwnershipToC, CowBytes, path2cstr, validate_compressed_buf_and_get_sizes,
+};
 use crate::{CParams, DParams, Error};
 
-pub struct SChunk<'a>(NonNull<blosc2_sys::blosc2_schunk>, PhantomData<&'a ()>);
-impl<'a> SChunk<'a> {
+pub struct SChunk(NonNull<blosc2_sys::blosc2_schunk>);
+impl SChunk {
     fn from_ptr(ptr: *mut blosc2_sys::blosc2_schunk) -> Result<Self, Error> {
-        let ptr = NonNull::new(ptr).ok_or(Error::Failure)?;
-        Ok(Self(ptr, PhantomData))
+        Ok(Self(NonNull::new(ptr).ok_or(Error::Failure)?))
     }
 
     pub fn new(
@@ -47,6 +47,7 @@ impl<'a> SChunk<'a> {
     pub fn open(urlpath: &Path) -> Result<Self, Error> {
         Self::open_with_offset(urlpath, 0)
     }
+
     pub fn open_with_offset(urlpath: &Path, offset: usize) -> Result<Self, Error> {
         let urlpath = path2cstr(urlpath);
         Self::from_ptr(unsafe {
@@ -55,23 +56,14 @@ impl<'a> SChunk<'a> {
     }
 
     pub fn from_buffer(buffer: CowBytes) -> Result<Self, Error> {
-        let bytes = buffer.as_slice();
-        let copy = match &buffer {
-            CowBytes::Borrowed(_) | CowBytes::OwnedRust(_) => true,
-            CowBytes::OwnedFfi(_) => false, // We move the ownership of the C allocated buffer to the C library
-        };
-
+        let buffer = BytesMaybePassOwnershipToC::new(buffer);
         let schunk = unsafe {
-            blosc2_sys::blosc2_schunk_from_buffer(bytes.as_ptr().cast_mut(), bytes.len() as _, copy)
+            blosc2_sys::blosc2_schunk_from_buffer(
+                buffer.as_slice().as_ptr().cast_mut(),
+                buffer.as_slice().len() as _,
+                !buffer.ownership_moved(),
+            )
         };
-
-        if copy {
-            drop(buffer);
-        } else {
-            // Forget the buffer to avoid calling its drop() and freeing it as its ownership was moved to the C library
-            std::mem::forget(buffer);
-        }
-
         Self::from_ptr(schunk)
     }
 
@@ -107,6 +99,7 @@ impl<'a> SChunk<'a> {
     }
 
     pub fn append(&mut self, data: &[u8]) -> Result<(), Error> {
+        // the size of chunks must be the same for every chunk
         unsafe {
             blosc2_sys::blosc2_schunk_append_buffer(
                 self.0.as_ptr(),
@@ -118,72 +111,41 @@ impl<'a> SChunk<'a> {
         Ok(())
     }
 
-    pub fn append_chunk(&mut self, chunk: &Chunk) -> Result<(), Error> {
-        unsafe { self.append_chunk_impl(chunk, true) }
-    }
-
-    pub fn append_chunk_nocopy(&mut self, chunk: &'a Chunk) -> Result<(), Error> {
-        unsafe { self.append_chunk_impl(chunk, false) }
-    }
-
-    unsafe fn append_chunk_impl(&mut self, chunk: &Chunk, copy: bool) -> Result<(), Error> {
+    pub fn append_chunk(&mut self, chunk: Chunk) -> Result<(), Error> {
+        let chunk = BytesMaybePassOwnershipToC::new(chunk.into_bytes());
         unsafe {
             blosc2_sys::blosc2_schunk_append_chunk(
                 self.0.as_ptr(),
-                chunk.as_bytes().as_ptr().cast_mut(),
-                copy,
+                chunk.as_slice().as_ptr().cast_mut(),
+                !chunk.ownership_moved(),
             )
             .into_result()?;
         }
         Ok(())
     }
 
-    pub fn update_chunk(&mut self, index: usize, chunk: &Chunk) -> Result<(), Error> {
-        unsafe { self.update_chunk_impl(index, chunk, true) }
-    }
-
-    pub fn update_chunk_nocopy(&mut self, index: usize, chunk: &'a Chunk) -> Result<(), Error> {
-        unsafe { self.update_chunk_impl(index, chunk, false) }
-    }
-
-    unsafe fn update_chunk_impl(
-        &mut self,
-        index: usize,
-        chunk: &Chunk,
-        copy: bool,
-    ) -> Result<(), Error> {
+    pub fn update_chunk(&mut self, index: usize, chunk: Chunk) -> Result<(), Error> {
+        let chunk = BytesMaybePassOwnershipToC::new(chunk.into_bytes());
         unsafe {
             blosc2_sys::blosc2_schunk_update_chunk(
                 self.0.as_ptr(),
                 index as _,
-                chunk.as_bytes().as_ptr().cast_mut(),
-                copy,
+                chunk.as_slice().as_ptr().cast_mut(),
+                !chunk.ownership_moved(),
             )
             .into_result()?;
         }
         Ok(())
     }
 
-    pub fn insert_chunk(&mut self, index: usize, chunk: &Chunk) -> Result<(), Error> {
-        unsafe { self.insert_chunk_impl(index, chunk, true) }
-    }
-
-    pub fn insert_chunk_nocopy(&mut self, index: usize, chunk: &'a Chunk) -> Result<(), Error> {
-        unsafe { self.insert_chunk_impl(index, chunk, false) }
-    }
-
-    unsafe fn insert_chunk_impl(
-        &mut self,
-        index: usize,
-        chunk: &Chunk,
-        copy: bool,
-    ) -> Result<(), Error> {
+    pub fn insert_chunk(&mut self, index: usize, chunk: Chunk) -> Result<(), Error> {
+        let chunk = BytesMaybePassOwnershipToC::new(chunk.into_bytes());
         unsafe {
             blosc2_sys::blosc2_schunk_insert_chunk(
                 self.0.as_ptr(),
                 index as _,
-                chunk.as_bytes().as_ptr().cast_mut(),
-                copy,
+                chunk.as_slice().as_ptr().cast_mut(),
+                !chunk.ownership_moved(),
             )
             .into_result()?;
         }
@@ -212,9 +174,7 @@ impl<'a> SChunk<'a> {
         let ptr = NonNull::new(unsafe { ptr.assume_init() }).ok_or(Error::Failure)?;
         let needs_free = unsafe { needs_free.assume_init() };
         let buf = unsafe { CowBytes::from_c_buf(ptr, len, needs_free) };
-        let mut chunk = Chunk::from_compressed(buf)?;
-        chunk.schunk = Some(self);
-        Ok(chunk)
+        Ok(unsafe { Chunk::from_compressed_unchecked(buf, Some(self)) })
     }
 
     pub fn decompress_chunk_into(
@@ -239,7 +199,7 @@ impl<'a> SChunk<'a> {
         unsafe { self.0.as_ref() }.nchunks as usize
     }
 }
-impl Drop for SChunk<'_> {
+impl Drop for SChunk {
     fn drop(&mut self) {
         let res = unsafe { blosc2_sys::blosc2_schunk_free(self.0.as_ptr()) }.into_result();
         if let Err(err) = res {
@@ -247,29 +207,25 @@ impl Drop for SChunk<'_> {
         }
     }
 }
+#[derive(Clone)]
 pub struct Chunk<'a> {
     buffer: CowBytes<'a>,
-    schunk: Option<&'a SChunk<'a>>,
+    schunk: Option<&'a SChunk>,
 }
 impl<'a> Chunk<'a> {
     pub fn from_data(data: &[u8]) -> Result<Self, Error> {
-        let buffer = crate::Encoder::new(Default::default())?
-            .compress(data)?
-            .into();
-        Ok(Self {
-            buffer,
-            schunk: None,
-        })
+        let buffer = crate::Encoder::new(Default::default())?.compress(data)?;
+        Ok(unsafe { Self::from_compressed_unchecked(buffer.into(), None) })
     }
 
     pub fn from_compressed(bytes: CowBytes<'a>) -> Result<Self, Error> {
         // validate, dont care about the sizes
         validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
+        Ok(unsafe { Self::from_compressed_unchecked(bytes, None) })
+    }
 
-        Ok(Self {
-            buffer: bytes,
-            schunk: None,
-        })
+    unsafe fn from_compressed_unchecked(buffer: CowBytes<'a>, schunk: Option<&'a SChunk>) -> Self {
+        Self { buffer, schunk }
     }
 
     pub fn as_bytes(&self) -> &[u8] {
@@ -287,5 +243,103 @@ impl<'a> Chunk<'a> {
             .map(|schunk| DParams(unsafe { *schunk.0.as_ref().storage.as_ref().unwrap().dparams }))
             .unwrap_or_default();
         crate::Decoder::new(dparams)?.decompress(self.buffer.as_slice())
+    }
+
+    pub fn shallow_clone(&self) -> Chunk {
+        Chunk {
+            buffer: self.buffer.shallow_clone(),
+            schunk: self.schunk,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::prelude::*;
+
+    use crate::chunk::{Chunk, SChunk};
+    use crate::util::tests::rand_src_len;
+    use crate::util::{CowBytes, FfiBytes};
+
+    #[test]
+    fn round_trip() {
+        let mut rand = StdRng::seed_from_u64(0xbe1392d28cdfb3ec);
+        for _ in 0..30 {
+            let data_chunks = rand_chunks_data(&mut rand);
+            let mut schunk = SChunk::new_in_memory(Default::default(), Default::default()).unwrap();
+            for data_chunk in &data_chunks {
+                schunk.append(&data_chunk).unwrap();
+            }
+            assert_eq_chunks(&mut schunk, &data_chunks, None);
+        }
+    }
+
+    #[test]
+    fn append_chunk() {
+        let mut rand = StdRng::seed_from_u64(0x612356293fbd4da9);
+        for _ in 0..30 {
+            let data_chunks = rand_chunks_data(&mut rand);
+            let chunks = data2chunks(&data_chunks);
+            let mut schunk = SChunk::new_in_memory(Default::default(), Default::default()).unwrap();
+            for chunk in rand_chunks_ownerships(&chunks, &mut rand) {
+                schunk.append_chunk(chunk).unwrap();
+            }
+            assert_eq_chunks(&mut schunk, &data_chunks, Some(&chunks));
+        }
+    }
+
+    fn rand_chunks_data(rand: &mut StdRng) -> Vec<Vec<u8>> {
+        let chunks_num = rand.random_range(0..4096);
+        let chunk_size = if chunks_num == 0 {
+            0
+        } else {
+            let max_total_size = rand_src_len(rand);
+            let max_chunk_size = max_total_size.div_ceil(chunks_num);
+            rand.random_range(0..=max_chunk_size)
+        };
+        (0..chunks_num)
+            .map(|_| rand.random_iter().take(chunk_size).collect::<Vec<u8>>())
+            .collect::<Vec<_>>()
+    }
+
+    fn data2chunks(data: &[impl AsRef<[u8]>]) -> Vec<Chunk<'static>> {
+        data.iter()
+            .map(|d| Chunk::from_data(d.as_ref()).unwrap())
+            .collect::<Vec<_>>()
+    }
+
+    fn rand_chunks_ownerships<'a>(chunks: &'a [Chunk], rand: &mut StdRng) -> Vec<Chunk<'a>> {
+        chunks
+            .iter()
+            .map(|chunk| rand_chunk_ownership(chunk, rand))
+            .collect::<Vec<_>>()
+    }
+
+    fn rand_chunk_ownership<'a>(chunk: &'a Chunk, rand: &mut StdRng) -> Chunk<'a> {
+        Chunk {
+            buffer: rand_bytes_ownership(&chunk.buffer, rand),
+            schunk: chunk.schunk,
+        }
+    }
+
+    fn rand_bytes_ownership<'a>(bytes: &'a CowBytes, rand: &mut StdRng) -> CowBytes<'a> {
+        match rand.random_range(0..3) {
+            0 => CowBytes::Borrowed(bytes.as_slice()),
+            1 => CowBytes::OwnedRust(bytes.as_slice().to_vec()),
+            2 => CowBytes::OwnedFfi(FfiBytes::copy_of(bytes.as_slice())),
+            _ => unreachable!(),
+        }
+    }
+
+    fn assert_eq_chunks(schunk: &mut SChunk, data_chunks: &[Vec<u8>], chunks: Option<&[Chunk]>) {
+        assert_eq!(schunk.num_chunks(), data_chunks.len());
+        for (i, data_chunk) in data_chunks.iter().enumerate() {
+            let chunk = schunk.get_chunk(i).unwrap();
+            if let Some(chunks) = chunks {
+                assert_eq!(chunk.as_bytes(), chunks[i].as_bytes());
+            }
+            let decompressed_chunk = chunk.decompress().unwrap();
+            assert_eq!(data_chunk, &decompressed_chunk);
+        }
     }
 }
