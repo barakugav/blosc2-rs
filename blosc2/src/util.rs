@@ -3,14 +3,21 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::path::Path;
 use std::ptr::NonNull;
 
-use crate::Error;
 use crate::error::ErrorCode;
+use crate::Error;
 
 pub struct FfiVec<T> {
     ptr: NonNull<T>,
     len: usize,
 }
 impl<T> FfiVec<T> {
+    /// Creates a new `FfiVec` from a raw pointer and length.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer is valid and points to a memory region of at least `len` elements of
+    /// type `T`. The memory must have be allocated using `malloc` and it will be freed using `free` when the `FfiVec`
+    /// is dropped.
     pub unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
         Self { ptr, len }
     }
@@ -193,7 +200,7 @@ pub(crate) mod tests {
         ]
         .into_iter()
         .unzip();
-        let dist = WeightedIndex::new(&weights).unwrap();
+        let dist = WeightedIndex::new(weights).unwrap();
         let max_len = max_lens[dist.sample(rand)];
         let len = rand.random_range(0..=max_len);
         ceil_to_multiple(len, typesize)
