@@ -13,12 +13,24 @@ mod util;
 mod tracing;
 pub(crate) use tracing::trace;
 
+use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
-use crate::util::validate_compressed_buf_and_get_sizes;
+use crate::util::{FfiVec, validate_compressed_buf_and_get_sizes};
+
+/// The version of the crate.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The version of the underlying C-blosc2 library used by this crate.
+pub const BLOSC2_C_VERSION: &str = {
+    match blosc2_sys::BLOSC2_VERSION_STRING.to_str() {
+        Ok(s) => s,
+        Err(_) => unreachable!(),
+    }
+};
 
 struct Context(NonNull<blosc2_sys::blosc2_context>);
 impl Drop for Context {
@@ -311,13 +323,41 @@ impl std::fmt::Debug for DParams {
 pub fn list_compressors() -> impl Iterator<Item = &'static str> {
     let compressors = unsafe { blosc2_sys::blosc2_list_compressors() };
     let len = unsafe { strlen(compressors) };
-    let slice = unsafe { std::slice::from_raw_parts(compressors.cast(), len + 1) };
+    let slice: &'static [u8] = unsafe { std::slice::from_raw_parts(compressors.cast(), len + 1) };
     let compressors = std::ffi::CStr::from_bytes_with_nul(slice).unwrap();
     let compressors = compressors.to_str().unwrap();
     compressors.split(',')
 }
 
-unsafe fn strlen(s: *const ::core::ffi::c_char) -> usize {
+pub fn compressor_lib_info(compressor: CompressAlgo) -> (String, String) {
+    let mut compname = MaybeUninit::<*const core::ffi::c_char>::uninit();
+    unsafe { blosc2_sys::blosc2_compcode_to_compname(compressor as _, compname.as_mut_ptr()) };
+    let compname = unsafe { compname.assume_init() };
+    assert!(!compname.is_null());
+
+    let mut complib = MaybeUninit::<*mut core::ffi::c_char>::uninit();
+    let mut version = MaybeUninit::<*mut core::ffi::c_char>::uninit();
+    unsafe {
+        blosc2_sys::blosc2_get_complib_info(compname, complib.as_mut_ptr(), version.as_mut_ptr())
+    };
+    let complib = NonNull::new(unsafe { complib.assume_init() }).unwrap();
+    let version = NonNull::new(unsafe { version.assume_init() }).unwrap();
+    let complib = unsafe { FfiVec::new(complib, strlen(complib.as_ptr()) + 1) };
+    let version = unsafe { FfiVec::new(version, strlen(version.as_ptr()) + 1) };
+
+    let complib_bytes =
+        unsafe { std::mem::transmute::<&[core::ffi::c_char], &[u8]>(complib.as_slice()) };
+    let complib = CStr::from_bytes_with_nul(complib_bytes).unwrap();
+    let complib = complib.to_str().unwrap().to_string();
+    let version_bytes =
+        unsafe { std::mem::transmute::<&[core::ffi::c_char], &[u8]>(version.as_slice()) };
+    let version = CStr::from_bytes_with_nul(version_bytes).unwrap();
+    let version = version.to_str().unwrap().to_string();
+
+    (complib, version)
+}
+
+unsafe fn strlen(s: *const core::ffi::c_char) -> usize {
     let mut len = 0;
     // SAFETY: Outer caller has provided a pointer to a valid C string.
     while unsafe { *s.add(len) } != 0 {
@@ -325,11 +365,6 @@ unsafe fn strlen(s: *const ::core::ffi::c_char) -> usize {
     }
     len
 }
-
-// BLOSC2_VERSION_STRING
-// TODO: -dev suffix
-
-// blosc2_get_complib_info
 
 #[cfg(test)]
 mod tests {

@@ -18,6 +18,7 @@ fn generate_bindings() {
         .allowlist_file(".*/blosc2.h")
         .allowlist_recursively(false)
         .default_enum_style(bindgen::EnumVariation::Consts)
+        .generate_cstr(true)
         .blocklist_item("blosc2_get_blosc2_stdio_mmap_defaults")
         .opaque_type("blosc_timestamp_t")
         .blocklist_item("BLOSC2_CPARAMS_DEFAULTS")
