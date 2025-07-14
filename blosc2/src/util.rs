@@ -11,7 +11,7 @@ pub struct FfiVec<T> {
     len: usize,
 }
 impl<T> FfiVec<T> {
-    pub unsafe fn new(ptr: NonNull<T>, len: usize) -> Self {
+    pub unsafe fn from_raw_parts(ptr: NonNull<T>, len: usize) -> Self {
         Self { ptr, len }
     }
 
@@ -59,10 +59,10 @@ pub enum CowVec<'a, T> {
     OwnedFfi(FfiVec<T>),
     Borrowed(&'a [T]),
 }
-impl<'a, T> CowVec<'a, T> {
+impl<T> CowVec<'_, T> {
     pub(crate) unsafe fn from_c_buf(ptr: NonNull<T>, len: usize, needs_free: bool) -> Self {
         if needs_free {
-            Self::OwnedFfi(FfiVec { ptr, len })
+            Self::OwnedFfi(unsafe { FfiVec::from_raw_parts(ptr, len) })
         } else {
             Self::Borrowed(unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) })
         }
@@ -87,12 +87,12 @@ impl<'a, T> CowVec<'a, T> {
     }
 }
 
-impl<'a, T> From<Vec<T>> for CowVec<'a, T> {
+impl<T> From<Vec<T>> for CowVec<'_, T> {
     fn from(value: Vec<T>) -> Self {
         Self::OwnedRust(value)
     }
 }
-impl<'a, T> From<FfiVec<T>> for CowVec<'a, T> {
+impl<T> From<FfiVec<T>> for CowVec<'_, T> {
     fn from(value: FfiVec<T>) -> Self {
         Self::OwnedFfi(value)
     }
@@ -102,7 +102,7 @@ impl<'a, T> From<&'a [T]> for CowVec<'a, T> {
         Self::Borrowed(value)
     }
 }
-impl<'a, T> AsRef<[T]> for CowVec<'a, T> {
+impl<T> AsRef<[T]> for CowVec<'_, T> {
     fn as_ref(&self) -> &[T] {
         self.as_slice()
     }
@@ -133,7 +133,7 @@ impl<'a> BytesMaybePassOwnershipToC<'a> {
         }
     }
 }
-impl<'a> Drop for BytesMaybePassOwnershipToC<'a> {
+impl Drop for BytesMaybePassOwnershipToC<'_> {
     fn drop(&mut self) {
         // If we didnt need to copy, the ownership moved to the C library.
         // Only drop in case we needed to copy the data and therefore we own the data.

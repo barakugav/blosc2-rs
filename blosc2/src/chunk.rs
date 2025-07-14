@@ -14,6 +14,14 @@ impl SChunk {
         Ok(Self(NonNull::new(ptr).ok_or(Error::Failure)?))
     }
 
+    pub fn new_in_memory(cparams: CParams, dparams: DParams) -> Result<Self, Error> {
+        Self::new(false, None, cparams, dparams)
+    }
+
+    pub fn new_on_disk(urlpath: &Path, cparams: CParams, dparams: DParams) -> Result<Self, Error> {
+        Self::new(false, Some(urlpath), cparams, dparams)
+    }
+
     pub fn new(
         contiguous: bool,
         urlpath: Option<&Path>,
@@ -36,14 +44,6 @@ impl SChunk {
             io: std::ptr::null_mut(),
         };
         Self::from_ptr(unsafe { blosc2_sys::blosc2_schunk_new(&mut storage as *mut _) })
-    }
-
-    pub fn new_in_memory(cparams: CParams, dparams: DParams) -> Result<Self, Error> {
-        Self::new(false, None, cparams, dparams)
-    }
-
-    pub fn new_on_disk(urlpath: &Path, cparams: CParams, dparams: DParams) -> Result<Self, Error> {
-        Self::new(false, Some(urlpath), cparams, dparams)
     }
 
     pub fn open(urlpath: &Path) -> Result<Self, Error> {
@@ -279,18 +279,16 @@ impl<'a> Chunk<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
     use std::fs::File;
     use std::io::Write;
     use std::mem::MaybeUninit;
-    use std::ptr::NonNull;
 
     use rand::prelude::*;
 
     use crate::chunk::{Chunk, SChunk};
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams, rand_src_len};
     use crate::util::{CowVec, FfiVec};
-    use crate::{CParams, DParams, Encoder, Filter};
+    use crate::{CParams, DParams, Encoder};
 
     #[test]
     fn round_trip() {
@@ -303,7 +301,7 @@ mod tests {
             let mut schunk = new_schunk(cparams, dparams, &mut rand);
             let schunk = schunk.as_mut();
             for data_chunk in &data_chunks {
-                schunk.append(&data_chunk).unwrap();
+                schunk.append(data_chunk).unwrap();
             }
             assert_eq_chunks(schunk, Some(&data_chunks), None);
         }
@@ -492,7 +490,7 @@ mod tests {
             let mut schunk = new_schunk(cparams, dparams, &mut rand);
             let schunk = schunk.as_mut();
             for data_chunk in &data_chunks {
-                schunk.append(&data_chunk).unwrap();
+                schunk.append(data_chunk).unwrap();
             }
             assert_eq_chunks(schunk, Some(&data_chunks), None);
 
@@ -528,7 +526,7 @@ mod tests {
             let mut schunk = new_schunk(cparams, dparams, &mut rand);
             let schunk = schunk.as_mut();
             for data_chunk in &data_chunks {
-                schunk.append(&data_chunk).unwrap();
+                schunk.append(data_chunk).unwrap();
             }
             assert_eq_chunks(schunk, Some(&data_chunks), None);
 
@@ -542,7 +540,7 @@ mod tests {
         assert!(typesize > 0);
         for _ in 0..100 {
             let data = rand_chunks_data(typesize, rand);
-            if data.len() > 0 && data.first().unwrap().len() > 0 {
+            if !data.is_empty() && !data.first().unwrap().is_empty() {
                 return data;
             }
         }
@@ -634,6 +632,7 @@ mod tests {
     }
 
     struct SChunkWrapper {
+        #[allow(unused)]
         temp_dir: tempfile::TempDir,
         schunk: SChunk,
     }

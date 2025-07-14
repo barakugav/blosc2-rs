@@ -30,7 +30,7 @@ impl Option {
 }
 
 thread_local! {
-    static TRACE_ENABLED: Option = Option::new();
+    static TRACE_ENABLED: Option = const { Option::new() };
 }
 
 #[inline(never)]
