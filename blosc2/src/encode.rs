@@ -21,6 +21,10 @@ impl Encoder {
         Ok(Self(Context(ctx)))
     }
 
+    pub(crate) fn ctx_ptr(&self) -> *mut blosc2_sys::blosc2_context {
+        self.0 .0.as_ptr()
+    }
+
     pub fn compress(&mut self, src: &[u8]) -> Result<Vec<u8>, Error> {
         let dst_max_len = src.len() + blosc2_sys::BLOSC2_MAX_OVERHEAD as usize;
         let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_max_len);
@@ -41,7 +45,7 @@ impl Encoder {
     ) -> Result<usize, Error> {
         let status = unsafe {
             blosc2_sys::blosc2_compress_ctx(
-                self.0 .0.as_ptr(),
+                self.ctx_ptr(),
                 src.as_ptr().cast(),
                 src.len() as _,
                 dst.as_mut_ptr().cast(),
@@ -60,6 +64,17 @@ impl Encoder {
             }
         }
     }
+
+    pub fn params(&self) -> CParams {
+        let mut params = MaybeUninit::<blosc2_sys::blosc2_cparams>::uninit();
+        unsafe {
+            blosc2_sys::blosc2_ctx_get_cparams(self.ctx_ptr(), params.as_mut_ptr())
+                .into_result()
+                .unwrap()
+        };
+        let params = unsafe { params.assume_init() };
+        CParams(params)
+    }
 }
 pub struct Decoder(Context);
 impl Decoder {
@@ -67,6 +82,10 @@ impl Decoder {
         let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
         let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
         Ok(Self(Context(ctx)))
+    }
+
+    pub(crate) fn ctx_ptr(&self) -> *mut blosc2_sys::blosc2_context {
+        self.0 .0.as_ptr()
     }
 
     pub fn decompress(&mut self, src: &[u8]) -> Result<Vec<u8>, Error> {
@@ -94,7 +113,7 @@ impl Decoder {
     ) -> Result<usize, Error> {
         let len = unsafe {
             blosc2_sys::blosc2_decompress_ctx(
-                self.0 .0.as_ptr(),
+                self.ctx_ptr(),
                 src.as_ptr().cast(),
                 src.len() as _,
                 dst.as_mut_ptr().cast(),
@@ -104,6 +123,17 @@ impl Decoder {
         };
         debug_assert!(len <= dst.len());
         Ok(len)
+    }
+
+    pub fn params(&self) -> DParams {
+        let mut params = MaybeUninit::<blosc2_sys::blosc2_dparams>::uninit();
+        unsafe {
+            blosc2_sys::blosc2_ctx_get_dparams(self.ctx_ptr(), params.as_mut_ptr())
+                .into_result()
+                .unwrap()
+        };
+        let params = unsafe { params.assume_init() };
+        DParams(params)
     }
 }
 
