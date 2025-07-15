@@ -2,9 +2,9 @@ use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
-use crate::Error;
 use crate::error::ErrorCode;
 use crate::util::validate_compressed_buf_and_get_sizes;
+use crate::Error;
 
 struct Context(NonNull<blosc2_sys::blosc2_context>);
 impl Drop for Context {
@@ -41,7 +41,7 @@ impl Encoder {
     ) -> Result<usize, Error> {
         let status = unsafe {
             blosc2_sys::blosc2_compress_ctx(
-                self.0.0.as_ptr(),
+                self.0 .0.as_ptr(),
                 src.as_ptr().cast(),
                 src.len() as _,
                 dst.as_mut_ptr().cast(),
@@ -94,7 +94,7 @@ impl Decoder {
     ) -> Result<usize, Error> {
         let len = unsafe {
             blosc2_sys::blosc2_decompress_ctx(
-                self.0.0.as_ptr(),
+                self.0 .0.as_ptr(),
                 src.as_ptr().cast(),
                 src.len() as _,
                 dst.as_mut_ptr().cast(),
@@ -149,7 +149,7 @@ impl CParams {
         self
     }
     pub fn get_compressor(&self) -> CompressAlgo {
-        match self.0.compcode as u32 {
+        match self.0.compcode as _ {
             blosc2_sys::BLOSC_BLOSCLZ => CompressAlgo::Blosclz,
             blosc2_sys::BLOSC_LZ4 => CompressAlgo::Lz4,
             blosc2_sys::BLOSC_LZ4HC => CompressAlgo::Lz4hc,
@@ -160,7 +160,7 @@ impl CParams {
     }
 
     pub fn clevel(&mut self, clevel: u32) -> &mut Self {
-        self.0.clevel = clevel as u8;
+        self.0.clevel = clevel as _;
         self
     }
     pub fn get_clevel(&self) -> u32 {
@@ -168,7 +168,7 @@ impl CParams {
     }
 
     pub fn typesize(&mut self, typesize: NonZeroUsize) -> &mut Self {
-        self.0.typesize = typesize.get() as i32;
+        self.0.typesize = typesize.get() as _;
         self
     }
     pub fn get_typesize(&self) -> NonZeroUsize {
@@ -190,7 +190,7 @@ impl CParams {
         self.0.blocksize = match blocksize {
             None => 0, // auto
             Some(0) => 1,
-            Some(blocksize) => blocksize as i32,
+            Some(blocksize) => blocksize as _,
         };
         self
     }
@@ -203,7 +203,7 @@ impl CParams {
         self
     }
     pub fn get_splitmode(&self) -> SplitMode {
-        match self.0.splitmode as u32 {
+        match self.0.splitmode as _ {
             blosc2_sys::BLOSC_ALWAYS_SPLIT => SplitMode::Always,
             blosc2_sys::BLOSC_NEVER_SPLIT => SplitMode::Never,
             blosc2_sys::BLOSC_AUTO_SPLIT => SplitMode::Auto,
@@ -236,12 +236,13 @@ impl CParams {
         Ok(self)
     }
     pub fn get_filters(&self) -> impl Iterator<Item = Filter> {
-        self.0
-            .filters
-            .iter()
-            .zip(self.0.filters_meta)
+        let filters = self.0.filters;
+        let filters_meta = self.0.filters_meta;
+        filters
+            .into_iter()
+            .zip(filters_meta)
             .filter_map(|(f, meta)| {
-                Some(match *f as u32 {
+                Some(match f as _ {
                     blosc2_sys::BLOSC_NOFILTER => return None,
                     blosc2_sys::BLOSC_SHUFFLE => Filter::Shuffle,
                     blosc2_sys::BLOSC_BITSHUFFLE => Filter::BitShuffle,

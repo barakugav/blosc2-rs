@@ -1,3 +1,7 @@
+#![cfg_attr(deny_warnings, deny(warnings))]
+// #![cfg_attr(deny_warnings, deny(missing_docs))]
+#![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
+
 // Set the BLOSC_TRACE environment variable
 //  * for getting more info on what is happening. If the error is not related with
 //  * wrong params, please report it back together with the buffer data causing this,

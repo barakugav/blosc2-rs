@@ -1,7 +1,7 @@
 [package]
 name = "blosc2"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 blosc2-sys = { package = "blosc2-rs-sys", path = "../blosc2-sys" }

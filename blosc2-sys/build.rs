@@ -15,7 +15,7 @@ fn generate_bindings() {
     let builder = bindgen::Builder::default()
         .use_core()
         .header("c/bindings.h")
-        .allowlist_file(".*/blosc2.h")
+        .allowlist_file(".*blosc2.h")
         .allowlist_recursively(false)
         .default_enum_style(bindgen::EnumVariation::Consts)
         .generate_cstr(true)
