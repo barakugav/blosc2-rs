@@ -63,6 +63,7 @@ fn build_c_lib() -> String {
     }
 
     let mut build = cmake::Config::new(&blosc_dir);
+    let bool2opt = |b: bool| if b { "ON" } else { "OFF" };
     build
         .define("BUILD_STATIC", "ON")
         .define("BUILD_SHARED", "OFF")
@@ -70,6 +71,8 @@ fn build_c_lib() -> String {
         .define("BUILD_FUZZERS", "OFF")
         .define("BUILD_BENCHMARKS", "OFF")
         .define("BUILD_EXAMPLES", "OFF")
+        .define("DEACTIVATE_ZLIB", bool2opt(!cfg!(feature = "zlib")))
+        .define("DEACTIVATE_ZSTD", bool2opt(!cfg!(feature = "zstd")))
         .out_dir(out_dir.join("c-blosc2-build"));
     let profile = build.get_profile().to_string();
     let blosc_build_dir = build.build();
