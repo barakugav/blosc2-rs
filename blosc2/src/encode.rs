@@ -92,7 +92,7 @@ impl Encoder {
         dst: &mut [MaybeUninit<u8>],
     ) -> Result<usize, Error> {
         let params = self.params();
-        let typesize = params.get_typesize().get();
+        let typesize = params.get_typesize();
         let nbytes = typesize * count;
         let status = match value {
             RepeatedValue::Zero => unsafe {
@@ -291,8 +291,9 @@ impl CParams {
         self.0.typesize = typesize.get() as _;
         self
     }
-    pub fn get_typesize(&self) -> NonZeroUsize {
-        NonZeroUsize::new(self.0.typesize as usize).unwrap()
+    pub fn get_typesize(&self) -> usize {
+        debug_assert!(self.0.typesize > 0);
+        self.0.typesize as usize
     }
 
     pub fn nthreads(&mut self, mut nthreads: usize) -> &mut Self {
@@ -429,7 +430,7 @@ mod tests {
         let mut rand = StdRng::seed_from_u64(0x83a9228e9af47dec);
         for _ in 0..30 {
             let cparams = rand_cparams(&mut rand);
-            let src_len = rand_src_len(cparams.get_typesize().get(), &mut rand);
+            let src_len = rand_src_len(cparams.get_typesize(), &mut rand);
             let src = (&mut rand).random_iter().take(src_len).collect::<Vec<u8>>();
 
             let compressed = Encoder::new(cparams).unwrap().compress(&src).unwrap();
@@ -447,7 +448,7 @@ mod tests {
         let mut rand = StdRng::seed_from_u64(0x83a9228e9af47dec);
         for _ in 0..30 {
             let cparams = rand_cparams(&mut rand);
-            let typesize = cparams.get_typesize().get();
+            let typesize = cparams.get_typesize();
 
             let mut element_buf = Vec::new();
             let value = {

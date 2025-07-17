@@ -273,7 +273,7 @@ pub(crate) mod tests {
         }
 
         let mut basic_filters = vec![Filter::Shuffle, Filter::BitShuffle, Filter::Delta];
-        if lossy && [4, 8].contains(&params.get_typesize().get()) {
+        if lossy && [4, 8].contains(&params.get_typesize()) {
             basic_filters.push(Filter::TruncPrecision {
                 prec_bits: rand.random_range(0..=10),
             });
