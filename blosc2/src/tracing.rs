@@ -40,9 +40,14 @@ pub(crate) fn is_trace_enabled() -> bool {
 }
 
 macro_rules! trace {
-    ($($arg:tt)*) => {{
+    ($s:expr) => {{
         if $crate::tracing::is_trace_enabled() {
-            eprintln!($($arg)*)
+            eprintln!(concat!($s, " ({}:{})"), file!(), line!())
+        }
+    }};
+    ($s:expr, $($arg:tt)*) => {{
+        if $crate::tracing::is_trace_enabled() {
+            eprintln!(concat!($s, " ({}:{})"), $($arg)*, file!(), line!())
         }
     }};
 }

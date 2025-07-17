@@ -232,7 +232,13 @@ pub(crate) mod tests {
             params.clevel(*clevel);
         }
 
-        let typesizes = [None, Some(4), Some(8), Some(rand.random_range(1..=64))];
+        let typesizes = [
+            None,
+            Some(4),
+            Some(8),
+            Some(rand.random_range(1..=16)),
+            Some(rand.random_range(1..=64)),
+        ];
         if let Some(typesize) = typesizes.choose(rand).unwrap() {
             params.typesize(NonZeroUsize::new(*typesize).unwrap());
         }
