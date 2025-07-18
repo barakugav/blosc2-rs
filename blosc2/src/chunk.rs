@@ -206,6 +206,46 @@ impl SChunk {
         Ok(len)
     }
 
+    pub fn copy(
+        &self,
+        contiguous: bool,
+        urlpath: Option<&Path>,
+        cparams: CParams,
+        dparams: DParams,
+    ) -> Result<SChunk, Error> {
+        crate::global::global_init();
+
+        let urlpath = urlpath.map(path2cstr);
+        let urlpath = urlpath
+            .as_ref()
+            .map(|p| p.as_ptr().cast_mut())
+            .unwrap_or(std::ptr::null_mut());
+
+        let mut storage = blosc2_sys::blosc2_storage {
+            contiguous,
+            urlpath,
+            cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
+            dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
+            io: std::ptr::null_mut(),
+        };
+
+        let schunk = unsafe { blosc2_sys::blosc2_schunk_copy(self.0.as_ptr(), &mut storage) };
+        Self::from_ptr(schunk)
+    }
+
+    pub fn copy_to_memory(&self, cparams: CParams, dparams: DParams) -> Result<SChunk, Error> {
+        self.copy(false, None, cparams, dparams)
+    }
+
+    pub fn copy_to_disk(
+        &self,
+        urlpath: &Path,
+        cparams: CParams,
+        dparams: DParams,
+    ) -> Result<SChunk, Error> {
+        self.copy(false, Some(urlpath), cparams, dparams)
+    }
+
     pub fn num_chunks(&self) -> usize {
         unsafe { self.0.as_ref() }.nchunks as usize
     }
@@ -703,6 +743,36 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn copy() {
+        let mut rand = StdRng::seed_from_u64(0x5d8a7ff46d9529df);
+        for _ in 0..30 {
+            let cparams = rand_cparams(&mut rand);
+            let dparams = rand_dparams(&mut rand);
+
+            let data_chunks = rand_chunks_data(cparams.get_typesize().get(), &mut rand);
+            let mut schunk = new_schunk(cparams, dparams, &mut rand);
+            let schunk = schunk.as_mut();
+            for data_chunk in &data_chunks {
+                schunk.append(data_chunk).unwrap();
+            }
+            assert_eq_chunks(schunk, Some(&data_chunks), None);
+
+            let cparams = rand_cparams(&mut rand);
+            let dparams = rand_dparams(&mut rand);
+            let temp_dir = tempfile::TempDir::new().unwrap();
+            let urlpath = temp_dir.path().join("schunk-dir2");
+            let mut schunk2 = match rand.random_range(0..4) {
+                0 => schunk.copy_to_memory(cparams, dparams).unwrap(),
+                1 => schunk.copy(true, None, cparams, dparams).unwrap(),
+                2 => schunk.copy_to_disk(&urlpath, cparams, dparams).unwrap(),
+                3 => schunk.copy(true, Some(&urlpath), cparams, dparams).unwrap(),
+                _ => unreachable!(),
+            };
+            assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
         }
     }
 
