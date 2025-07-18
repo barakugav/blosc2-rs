@@ -10,6 +10,7 @@ mod c_bridge {
     #![allow(clippy::missing_safety_doc)]
     #![allow(rustdoc::invalid_html_tags)]
     #![allow(rustdoc::broken_intra_doc_links)]
+    #![allow(rustdoc::bare_urls)]
     #![allow(missing_docs)]
     #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
     #![allow(clippy::suspicious_doc_comments)]

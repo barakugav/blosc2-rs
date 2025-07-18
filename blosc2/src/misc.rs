@@ -2,9 +2,10 @@ use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use crate::CompressAlgo;
 use crate::util::FfiVec;
+use crate::CompressAlgo;
 
+/// Get a list of compressors names supported in the current build.
 pub fn list_compressors() -> impl Iterator<Item = &'static str> {
     let compressors = unsafe { blosc2_sys::blosc2_list_compressors() };
     let len = unsafe { libc::strlen(compressors) };
@@ -14,6 +15,15 @@ pub fn list_compressors() -> impl Iterator<Item = &'static str> {
     compressors.split(',')
 }
 
+/// Get info from a compression library included in the current build.
+///
+/// # Arguments
+///
+/// * `compressor`: The compressor algorithm to get info from.
+///
+/// # Returns
+///
+/// A tuple containing the compression library name and its version.
 pub fn compressor_lib_info(compressor: CompressAlgo) -> (String, String) {
     let mut compname = MaybeUninit::<*const core::ffi::c_char>::uninit();
     unsafe { blosc2_sys::blosc2_compcode_to_compname(compressor as _, compname.as_mut_ptr()) };

@@ -1,3 +1,5 @@
+//! Utility functions and types.
+
 use std::ffi::CString;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::path::Path;
@@ -6,12 +8,20 @@ use std::ptr::NonNull;
 use crate::error::ErrorCode;
 use crate::Error;
 
+/// A vector similar to `Vec<T>`, but allocated using C's `malloc` and freed using `free`.
+///
+/// This type is useful for returning buffers allocated by C code to Rust.
+/// The struct does not support resizing.
 pub struct FfiVec<T> {
     ptr: NonNull<T>,
     len: usize,
 }
 impl<T> FfiVec<T> {
     /// Creates a new `FfiVec` from a raw pointer and length.
+    ///
+    /// Note that the `len` is not the length of allocation, but rather the number of valid elements
+    /// in the vector. The "capacity" is not passed, as it is not required by C's `free` and resizing
+    /// is not supported.
     ///
     /// # Safety
     ///
@@ -22,9 +32,11 @@ impl<T> FfiVec<T> {
         Self { ptr, len }
     }
 
+    /// Get a slice of the elements in the vector.
     pub fn as_slice(&self) -> &[T] {
         unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
+    /// Get a mutable slice of the elements in the vector.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
     }
@@ -36,6 +48,8 @@ impl<T> Drop for FfiVec<T> {
     }
 }
 impl FfiVec<u8> {
+    /// Creates a new `FfiVec` from a byte slice by allocating memory using `malloc` and copying
+    /// the bytes data.
     pub fn copy_of(buf: &[u8]) -> Self {
         let ptr = unsafe { libc::malloc(buf.len()) };
         let ptr = NonNull::new(ptr as *mut u8).unwrap();
@@ -61,9 +75,15 @@ where
     }
 }
 
+/// A super type of either a `Vec<T>`, an `FfiVec<T>` or a borrowed slice of type `&[T]`.
+///
+/// This type is similar to `Cow<[T]>`, but it also has a variant for `FfiVec<T>`.
 pub enum CowVec<'a, T> {
+    /// An owned `Vec<T>`.
     OwnedRust(Vec<T>),
+    /// An owned `FfiVec<T>`, allocated using C's `malloc`.
     OwnedFfi(FfiVec<T>),
+    /// A borrowed slice of type `&[T]`.
     Borrowed(&'a [T]),
 }
 impl<T> CowVec<'_, T> {
@@ -75,6 +95,7 @@ impl<T> CowVec<'_, T> {
         }
     }
 
+    /// Get a slice of the elements in the vector.
     pub fn as_slice(&self) -> &[T] {
         match self {
             Self::OwnedRust(vec) => vec.as_slice(),
@@ -83,6 +104,7 @@ impl<T> CowVec<'_, T> {
         }
     }
 
+    /// Convert the `CowVec` into a `Vec<T>`, cloning the data if necessary.
     pub fn into_vec(self) -> Vec<T>
     where
         T: Clone,
@@ -272,13 +294,13 @@ pub(crate) mod tests {
             params.splitmode(*splitmode);
         }
 
-        let mut basic_filters = vec![Filter::Shuffle, Filter::BitShuffle, Filter::Delta];
+        let mut basic_filters = vec![Filter::ByteShuffle, Filter::BitShuffle, Filter::Delta];
         if lossy && [4, 8].contains(&params.get_typesize()) {
             basic_filters.push(Filter::TruncPrecision {
                 prec_bits: rand.random_range(0..=10),
             });
         }
-        let filters = [Filter::Shuffle]
+        let filters = [Filter::ByteShuffle]
             .iter()
             .map(|f| Some(vec![f.clone()]))
             .chain([None, Some(Vec::new()), {
