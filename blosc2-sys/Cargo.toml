@@ -1,12 +1,12 @@
 [package]
 name = "blosc2-rs-sys"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # println!("cargo::...")
 rust-version = "1.77.0"
 authors = ["Barak Ugav <barakugav@gmail.com>"]
 description = "Unsafe Rust bindings for blosc2 - a fast, compressed, persistent binary data store library"
-links = "blosc"
+links = "blosc2"
 readme = "README.md"
 repository = "https://github.com/barakugav/blosc2-rs"
 license = "Apache-2.0"
