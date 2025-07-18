@@ -15,7 +15,10 @@ categories = ["compression", "external-ffi-bindings"]
 
 [dependencies]
 
-
 [build-dependencies]
 bindgen = "0.72"
 cmake = "0.1"
+
+[features]
+zlib = []
+zstd = []

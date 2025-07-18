@@ -112,7 +112,9 @@ pub enum CompressAlgo {
     Blosclz = blosc2_sys::BLOSC_BLOSCLZ as _,
     Lz4 = blosc2_sys::BLOSC_LZ4 as _,
     Lz4hc = blosc2_sys::BLOSC_LZ4HC as _,
+    #[cfg(feature = "zlib")]
     Zlib = blosc2_sys::BLOSC_ZLIB as _,
+    #[cfg(feature = "zstd")]
     Zstd = blosc2_sys::BLOSC_ZSTD as _,
 }
 
@@ -153,7 +155,9 @@ impl CParams {
             blosc2_sys::BLOSC_BLOSCLZ => CompressAlgo::Blosclz,
             blosc2_sys::BLOSC_LZ4 => CompressAlgo::Lz4,
             blosc2_sys::BLOSC_LZ4HC => CompressAlgo::Lz4hc,
+            #[cfg(feature = "zlib")]
             blosc2_sys::BLOSC_ZLIB => CompressAlgo::Zlib,
+            #[cfg(feature = "zstd")]
             blosc2_sys::BLOSC_ZSTD => CompressAlgo::Zstd,
             unknown_code => panic!("Unknown compressor code: {unknown_code}"),
         }

@@ -218,7 +218,9 @@ pub(crate) mod tests {
             Some(CompressAlgo::Blosclz),
             Some(CompressAlgo::Lz4),
             Some(CompressAlgo::Lz4hc),
+            #[cfg(feature = "zlib")]
             Some(CompressAlgo::Zlib),
+            #[cfg(feature = "zstd")]
             Some(CompressAlgo::Zstd),
         ];
         if let Some(compressor) = compressors.choose(rand).unwrap() {
