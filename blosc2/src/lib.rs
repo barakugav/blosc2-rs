@@ -19,6 +19,9 @@ pub use misc::*;
 mod chunk;
 pub use chunk::*;
 
+mod schunk;
+pub use schunk::*;
+
 mod global;
 pub mod util;
 
