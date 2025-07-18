@@ -120,7 +120,7 @@ impl Error {
             blosc2_sys::BLOSC2_ERROR_MAX_BUFSIZE_EXCEEDED => Error::MaxBufsizeExceeded,
             blosc2_sys::BLOSC2_ERROR_TUNER => Error::Tuner,
             unknown => {
-                eprintln!("Unknown blosc2 error code: {unknown}");
+                crate::trace!("Unknown blosc2 error code: {}", unknown);
                 Error::Failure
             }
         }

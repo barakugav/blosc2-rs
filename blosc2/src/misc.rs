@@ -25,13 +25,13 @@ pub fn list_compressors() -> impl Iterator<Item = &'static str> {
 ///
 /// A tuple containing the compression library name and its version.
 pub fn compressor_lib_info(compressor: CompressAlgo) -> (String, String) {
-    let mut compname = MaybeUninit::<*const core::ffi::c_char>::uninit();
+    let mut compname = MaybeUninit::uninit();
     unsafe { blosc2_sys::blosc2_compcode_to_compname(compressor as _, compname.as_mut_ptr()) };
     let compname = unsafe { compname.assume_init() };
     assert!(!compname.is_null());
 
-    let mut complib = MaybeUninit::<*mut core::ffi::c_char>::uninit();
-    let mut version = MaybeUninit::<*mut core::ffi::c_char>::uninit();
+    let mut complib = MaybeUninit::uninit();
+    let mut version = MaybeUninit::uninit();
     unsafe {
         blosc2_sys::blosc2_get_complib_info(compname, complib.as_mut_ptr(), version.as_mut_ptr())
     };

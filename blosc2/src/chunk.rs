@@ -21,8 +21,8 @@ impl<'a> Chunk<'a> {
         let (nbytes, _cbytes, _blocksize) =
             validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
 
-        let mut typesize = MaybeUninit::<usize>::uninit();
-        let mut flags = MaybeUninit::<i32>::uninit();
+        let mut typesize = MaybeUninit::uninit();
+        let mut flags = MaybeUninit::uninit();
         unsafe {
             blosc2_sys::blosc1_cbuffer_metainfo(
                 bytes.as_slice().as_ptr().cast(),
