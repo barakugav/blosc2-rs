@@ -65,6 +65,83 @@ impl Encoder {
         }
     }
 
+    pub fn compress_repeatval(
+        &self,
+        count: usize,
+        value: &RepeatedValue,
+    ) -> Result<Vec<u8>, Error> {
+        let header_size = blosc2_sys::BLOSC_EXTENDED_HEADER_LENGTH as usize;
+        let dst_len = match &value {
+            RepeatedValue::Zero | RepeatedValue::Nan | RepeatedValue::Uninit => header_size,
+            RepeatedValue::Value(value) => header_size + value.len(),
+        };
+        let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(dst_len);
+        unsafe { dst.set_len(dst_len) };
+
+        let len = self.compress_repeatval_into(count, value, dst.as_mut_slice())?;
+        assert_eq!(len, dst_len);
+        // SAFETY: every element from 0 to len was initialized
+        let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) };
+        Ok(vec)
+    }
+
+    pub fn compress_repeatval_into(
+        &self,
+        count: usize,
+        value: &RepeatedValue,
+        dst: &mut [MaybeUninit<u8>],
+    ) -> Result<usize, Error> {
+        let params = self.params();
+        let typesize = params.get_typesize().get();
+        let nbytes = typesize * count;
+        let status = match value {
+            RepeatedValue::Zero => unsafe {
+                blosc2_sys::blosc2_chunk_zeros(
+                    params.0,
+                    nbytes as _,
+                    dst.as_mut_ptr().cast(),
+                    dst.len() as _,
+                )
+            },
+            RepeatedValue::Nan => unsafe {
+                blosc2_sys::blosc2_chunk_nans(
+                    params.0,
+                    nbytes as _,
+                    dst.as_mut_ptr().cast(),
+                    dst.len() as _,
+                )
+            },
+            RepeatedValue::Value(value) => {
+                if value.len() != typesize {
+                    crate::trace!(
+                        "Repeated value size doesn't match CParams: {} != {}",
+                        value.len(),
+                        typesize
+                    );
+                    return Err(Error::InvalidParam);
+                }
+                unsafe {
+                    blosc2_sys::blosc2_chunk_repeatval(
+                        params.0,
+                        nbytes as _,
+                        dst.as_mut_ptr().cast(),
+                        dst.len() as _,
+                        value.as_ptr().cast(),
+                    )
+                }
+            }
+            RepeatedValue::Uninit => unsafe {
+                blosc2_sys::blosc2_chunk_uninit(
+                    params.0,
+                    nbytes as _,
+                    dst.as_mut_ptr().cast(),
+                    dst.len() as _,
+                )
+            },
+        };
+        Ok(status.into_result()? as usize)
+    }
+
     pub fn params(&self) -> CParams {
         let mut params = MaybeUninit::<blosc2_sys::blosc2_cparams>::uninit();
         unsafe {
@@ -76,6 +153,15 @@ impl Encoder {
         CParams(params)
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RepeatedValue<'a> {
+    Zero,
+    Nan,
+    Uninit,
+    Value(&'a [u8]),
+}
+
 pub struct Decoder(Context);
 impl Decoder {
     pub fn new(params: DParams) -> Result<Self, Error> {
@@ -336,6 +422,7 @@ mod tests {
 
     use super::{Decoder, Encoder};
     use crate::util::tests::{rand_cparams, rand_dparams, rand_src_len};
+    use crate::RepeatedValue;
 
     #[test]
     fn round_trip() {
@@ -352,6 +439,60 @@ mod tests {
                 .decompress(&compressed)
                 .unwrap();
             assert_eq!(src, decompressed);
+        }
+    }
+
+    #[test]
+    fn repeatedval() {
+        let mut rand = StdRng::seed_from_u64(0x83a9228e9af47dec);
+        for _ in 0..30 {
+            let cparams = rand_cparams(&mut rand);
+            let typesize = cparams.get_typesize().get();
+
+            let mut element_buf = Vec::new();
+            let value = {
+                element_buf.clear();
+                element_buf.extend(
+                    (&mut rand)
+                        .random_iter()
+                        .take(typesize)
+                        .collect::<Vec<u8>>(),
+                );
+
+                let mut variants = Vec::new();
+                variants.push(RepeatedValue::Zero);
+                variants.push(RepeatedValue::Uninit);
+                variants.push(RepeatedValue::Value(&element_buf));
+                if [4, 8].contains(&typesize) {
+                    variants.push(RepeatedValue::Nan);
+                }
+
+                variants.choose(&mut rand).unwrap().clone()
+            };
+            let src_len = rand_src_len(typesize, &mut rand);
+
+            let compressed = Encoder::new(cparams)
+                .unwrap()
+                .compress_repeatval(src_len / typesize, &value)
+                .unwrap();
+
+            let decompressed = Decoder::new(rand_dparams(&mut rand))
+                .unwrap()
+                .decompress(&compressed)
+                .unwrap();
+            assert_eq!(src_len, decompressed.len());
+            for item in decompressed.chunks_exact(typesize) {
+                match value {
+                    RepeatedValue::Zero => assert!(item.iter().all(|&b| b == 0)),
+                    RepeatedValue::Nan => match typesize {
+                        4 => assert!(f32::from_ne_bytes(item.try_into().unwrap()).is_nan()),
+                        8 => assert!(f64::from_ne_bytes(item.try_into().unwrap()).is_nan()),
+                        _ => panic!("Unexpected typesize for NaN: {}", typesize),
+                    },
+                    RepeatedValue::Uninit => {}
+                    RepeatedValue::Value(v) => assert_eq!(item, v),
+                }
+            }
         }
     }
 }
