@@ -1,12 +1,13 @@
+use std::cell::RefCell;
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
 use crate::util::{
-    BytesMaybePassOwnershipToC, CowVec, path2cstr, validate_compressed_buf_and_get_sizes,
+    path2cstr, validate_compressed_buf_and_get_sizes, BytesMaybePassOwnershipToC, CowVec,
 };
-use crate::{CParams, DParams, Error};
+use crate::{CParams, DParams, Decoder, Error};
 
 pub struct SChunk(NonNull<blosc2_sys::blosc2_schunk>);
 impl SChunk {
@@ -182,8 +183,8 @@ impl SChunk {
         let ptr = NonNull::new(unsafe { ptr.assume_init() }).ok_or(Error::Failure)?;
         let needs_free = unsafe { needs_free.assume_init() };
         let buf = unsafe { CowVec::from_c_buf(ptr, len, needs_free) };
-        let mut chunk = Chunk::from_compressed(buf)?;
-        chunk.schunk = Some(self);
+        let chunk = Chunk::from_compressed(buf)?;
+        chunk.set_dparams(self.dparams())?;
         Ok(chunk)
     }
 
@@ -225,29 +226,42 @@ impl Drop for SChunk {
         }
     }
 }
-#[derive(Clone)]
 pub struct Chunk<'a> {
     buffer: CowVec<'a, u8>,
     nbytes: usize,
-    schunk: Option<&'a SChunk>,
+    typesize: usize,
+    decoder: RefCell<Option<Decoder>>,
 }
 impl<'a> Chunk<'a> {
     pub fn from_data(data: &[u8]) -> Result<Self, Error> {
         let buffer = crate::Encoder::new(Default::default())?.compress(data)?;
-        Ok(Self {
-            buffer: buffer.into(),
-            nbytes: data.len(),
-            schunk: None,
-        })
+        Self::from_compressed(buffer.into())
     }
 
     pub fn from_compressed(bytes: CowVec<'a, u8>) -> Result<Self, Error> {
         let (nbytes, _cbytes, _blocksize) =
             validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
+
+        let mut typesize = MaybeUninit::<usize>::uninit();
+        let mut flags = MaybeUninit::<i32>::uninit();
+        unsafe {
+            blosc2_sys::blosc1_cbuffer_metainfo(
+                bytes.as_slice().as_ptr().cast(),
+                typesize.as_mut_ptr(),
+                flags.as_mut_ptr(),
+            );
+        }
+        let typesize = unsafe { typesize.assume_init() };
+        // let flags = unsafe { flags.assume_init() };
+        if typesize == 0 {
+            return Err(Error::Failure);
+        }
+
         Ok(Self {
             buffer: bytes,
             nbytes: nbytes as usize,
-            schunk: None,
+            typesize,
+            decoder: RefCell::new(None),
         })
     }
 
@@ -259,20 +273,135 @@ impl<'a> Chunk<'a> {
         self.buffer
     }
 
+    fn decoder_mut(&self) -> Result<std::cell::RefMut<'_, Decoder>, Error> {
+        let mut decoder = self.decoder.borrow_mut();
+        if decoder.is_none() {
+            *decoder = Some(Decoder::new(Default::default())?);
+        }
+        Ok(std::cell::RefMut::map(decoder, |d| d.as_mut().unwrap()))
+    }
+
+    pub fn get_dparams(&self) -> DParams {
+        self.decoder
+            .borrow()
+            .as_ref()
+            .map(|decoder| decoder.params())
+            .unwrap_or_default()
+    }
+
+    pub fn set_dparams(&self, params: DParams) -> Result<(), Error> {
+        *self.decoder.borrow_mut() = Some(Decoder::new(params)?);
+        Ok(())
+    }
+
     pub fn decompress(&self) -> Result<Vec<u8>, Error> {
-        let dparams = self.schunk.map(SChunk::dparams).unwrap_or_default();
-        crate::Decoder::new(dparams)?.decompress(self.buffer.as_slice())
+        self.decoder_mut()?.decompress(self.buffer.as_slice())
     }
 
     pub fn nbytes(&self) -> usize {
         self.nbytes
     }
 
+    pub fn typesize(&self) -> usize {
+        self.typesize
+    }
+
+    pub fn items_num(&self) -> usize {
+        self.nbytes / self.typesize
+    }
+
+    /// Get an item at the specified index.
+    ///
+    /// Each item is `typesize` (as provided during encoding) bytes long, and the index is zero-based.
+    ///
+    /// Note that the returned vector may not be aligned to the original data type's alignment, and the caller should
+    /// ensure that the alignment is correct before transmuting it to original type. If the alignment does not match
+    /// the original data type, the bytes should be copied to a new aligned allocation before transmuting, otherwise
+    /// undefined behavior may occur. Alternatively, the caller can use [`Self::item_into`] and provide an already
+    /// aligned destination buffer.
+    ///
+    pub fn item(&self, idx: usize) -> Result<Vec<u8>, Error> {
+        self.items(idx..idx + 1)
+    }
+
+    /// Get an item at the specified index and copy it into the provided destination buffer.
+    ///
+    /// Each item is `typesize` (as provided during encoding) bytes long, and the index is zero-based.
+    ///
+    /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
+    /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
+    pub fn item_into(&self, idx: usize, dst: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
+        self.items_into(idx..idx + 1, dst)
+    }
+
+    /// Get a range of items specified by the index range.
+    ///
+    /// Each item is `typesize` (as provided during encoding) bytes long, and the index is zero-based.
+    ///
+    /// Note that the returned vector may not be aligned to the original data type's alignment, and the caller should
+    /// ensure that the alignment is correct before transmuting it to original type. If the alignment does not match
+    /// the original data type, the bytes should be copied to a new aligned allocation before transmuting, otherwise
+    /// undefined behavior may occur. Alternatively, the caller can use [`Self::items_into`] and provide an already
+    /// aligned destination buffer.
+    pub fn items(&self, idx: std::ops::Range<usize>) -> Result<Vec<u8>, Error> {
+        let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(self.typesize * idx.len());
+        unsafe { dst.set_len(self.typesize * idx.len()) };
+        let len = self.items_into(idx, &mut dst)?;
+
+        assert!(len <= dst.len());
+        unsafe { dst.set_len(len) };
+        // SAFETY: every element from 0 to len was initialized
+        Ok(unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) })
+    }
+
+    /// Get a range of items specified by the index range and copy them into the provided destination buffer.
+    ///
+    /// Each item is `typesize` (as provided during encoding) bytes long, and the index is zero-based.
+    ///
+    /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
+    /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
+    pub fn items_into(
+        &self,
+        idx: std::ops::Range<usize>,
+        dst: &mut [MaybeUninit<u8>],
+    ) -> Result<usize, Error> {
+        Ok(unsafe {
+            blosc2_sys::blosc2_getitem_ctx(
+                self.decoder_mut()?.ctx_ptr(),
+                self.buffer.as_slice().as_ptr().cast(),
+                self.buffer.as_slice().len() as _,
+                idx.start as _,
+                idx.len() as _,
+                dst.as_mut_ptr().cast(),
+                dst.len() as _,
+            )
+            .into_result()? as usize
+        })
+    }
+
     pub fn shallow_clone(&self) -> Chunk {
         Chunk {
             buffer: CowVec::Borrowed(self.buffer.as_slice()),
             nbytes: self.nbytes,
-            schunk: self.schunk,
+            typesize: self.typesize,
+            decoder: RefCell::new(self.copy_decoder()),
+        }
+    }
+
+    fn copy_decoder(&self) -> Option<Decoder> {
+        self.decoder
+            .borrow()
+            .as_ref()
+            .and_then(|decoder| Decoder::new(decoder.params()).ok( /* On error, ignore and dont copy the decoder */))
+    }
+}
+impl Clone for Chunk<'_> {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.clone(),
+            nbytes: self.nbytes,
+            typesize: self.typesize,
+            decoder: RefCell::new(self.copy_decoder()),
         }
     }
 }
@@ -533,6 +662,47 @@ mod tests {
             let buffer = schunk.to_buffer().unwrap();
             let mut schunk2 = SChunk::from_buffer(buffer).unwrap();
             assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
+        }
+    }
+
+    #[test]
+    fn get_item() {
+        let mut rand = StdRng::seed_from_u64(0xb47b5287627f3d57);
+        for _ in 0..30 {
+            let cparams = rand_cparams(&mut rand);
+            let dparams = rand_dparams(&mut rand);
+
+            let len = rand_src_len(cparams.get_typesize().get(), &mut rand);
+            let data = rand_chunk_data(len, &mut rand);
+            let buffer = Encoder::new(cparams.clone())
+                .unwrap()
+                .compress(&data)
+                .unwrap();
+            let chunk = Chunk::from_compressed(buffer.into()).unwrap();
+
+            chunk.set_dparams(dparams).unwrap();
+            assert_eq!(cparams.get_typesize().get(), chunk.typesize());
+            assert_eq!(len, chunk.nbytes());
+            assert_eq!(len / chunk.typesize(), chunk.items_num());
+            if chunk.items_num() > 0 {
+                for _ in 0..10 {
+                    let idx = rand.random_range(0..chunk.items_num());
+                    let item = chunk.item(idx).unwrap();
+                    assert_eq!(
+                        item,
+                        data[idx * chunk.typesize()..(idx + 1) * chunk.typesize()]
+                    );
+                }
+                for _ in 0..10 {
+                    let start = rand.random_range(0..chunk.items_num());
+                    let end = rand.random_range(start..chunk.items_num());
+                    let items = chunk.items(start..end).unwrap();
+                    assert_eq!(
+                        items,
+                        data[start * chunk.typesize()..end * chunk.typesize()]
+                    );
+                }
+            }
         }
     }
 
