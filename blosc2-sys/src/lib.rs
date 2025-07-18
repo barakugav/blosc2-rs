@@ -1,7 +1,13 @@
-// Set the BLOSC_TRACE environment variable
-//  * for getting more info on what is happening. If the error is not related with
-//  * wrong params, please report it back together with the buffer data causing this,
-//  * as well as the compression params used.
+//! Unsafe Rust bindings for blosc2 - a fast, compressed, persistent binary data store library.
+//!
+//! ## Features
+//! Cargo features enable or disable support for various compression codecs such as `zstd` and
+//! `zlib`.
+//!
+//! ## Error Handling
+//! Errors are represented by int codes. In addition, if the environment variable
+//! `BLOSC_TRACE` is set, it will print detailed trace during failures which is useful for
+//! debugging.
 
 mod c_bridge {
     #![allow(dead_code)]

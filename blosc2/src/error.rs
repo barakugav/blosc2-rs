@@ -120,52 +120,62 @@ impl Error {
             blosc2_sys::BLOSC2_ERROR_MAX_BUFSIZE_EXCEEDED => Error::MaxBufsizeExceeded,
             blosc2_sys::BLOSC2_ERROR_TUNER => Error::Tuner,
             unknown => {
-                eprintln!("Unknown blosc2 error code: {unknown}");
+                crate::trace!("Unknown blosc2 error code: {}", unknown);
                 Error::Failure
             }
+        }
+    }
+
+    pub(crate) fn to_int(&self) -> core::ffi::c_int {
+        match self {
+            Error::Failure => blosc2_sys::BLOSC2_ERROR_FAILURE,
+            Error::Stream => blosc2_sys::BLOSC2_ERROR_STREAM,
+            Error::Data => blosc2_sys::BLOSC2_ERROR_DATA,
+            Error::MemoryAlloc => blosc2_sys::BLOSC2_ERROR_MEMORY_ALLOC,
+            Error::ReadBuffer => blosc2_sys::BLOSC2_ERROR_READ_BUFFER,
+            Error::WriteBuffer => blosc2_sys::BLOSC2_ERROR_WRITE_BUFFER,
+            Error::CodecSupport => blosc2_sys::BLOSC2_ERROR_CODEC_SUPPORT,
+            Error::CodecParam => blosc2_sys::BLOSC2_ERROR_CODEC_PARAM,
+            Error::CodecDict => blosc2_sys::BLOSC2_ERROR_CODEC_DICT,
+            Error::VersionSupport => blosc2_sys::BLOSC2_ERROR_VERSION_SUPPORT,
+            Error::InvalidHeader => blosc2_sys::BLOSC2_ERROR_INVALID_HEADER,
+            Error::InvalidParam => blosc2_sys::BLOSC2_ERROR_INVALID_PARAM,
+            Error::FileRead => blosc2_sys::BLOSC2_ERROR_FILE_READ,
+            Error::FileWrite => blosc2_sys::BLOSC2_ERROR_FILE_WRITE,
+            Error::FileOpen => blosc2_sys::BLOSC2_ERROR_FILE_OPEN,
+            Error::NotFound => blosc2_sys::BLOSC2_ERROR_NOT_FOUND,
+            Error::RunLength => blosc2_sys::BLOSC2_ERROR_RUN_LENGTH,
+            Error::FilterPipeline => blosc2_sys::BLOSC2_ERROR_FILTER_PIPELINE,
+            Error::ChunkInsert => blosc2_sys::BLOSC2_ERROR_CHUNK_INSERT,
+            Error::ChunkAppend => blosc2_sys::BLOSC2_ERROR_CHUNK_APPEND,
+            Error::ChunkUpdate => blosc2_sys::BLOSC2_ERROR_CHUNK_UPDATE,
+            Error::TwoGbLimit => blosc2_sys::BLOSC2_ERROR_2GB_LIMIT,
+            Error::SchunkCopy => blosc2_sys::BLOSC2_ERROR_SCHUNK_COPY,
+            Error::FrameType => blosc2_sys::BLOSC2_ERROR_FRAME_TYPE,
+            Error::FileTruncate => blosc2_sys::BLOSC2_ERROR_FILE_TRUNCATE,
+            Error::ThreadCreate => blosc2_sys::BLOSC2_ERROR_THREAD_CREATE,
+            Error::Postfilter => blosc2_sys::BLOSC2_ERROR_POSTFILTER,
+            Error::FrameSpecial => blosc2_sys::BLOSC2_ERROR_FRAME_SPECIAL,
+            Error::SChunkSpecial => blosc2_sys::BLOSC2_ERROR_SCHUNK_SPECIAL,
+            Error::PluginIO => blosc2_sys::BLOSC2_ERROR_PLUGIN_IO,
+            Error::FileRemove => blosc2_sys::BLOSC2_ERROR_FILE_REMOVE,
+            Error::NullPointer => blosc2_sys::BLOSC2_ERROR_NULL_POINTER,
+            Error::InvalidIndex => blosc2_sys::BLOSC2_ERROR_INVALID_INDEX,
+            Error::MetalayerNotFound => blosc2_sys::BLOSC2_ERROR_METALAYER_NOT_FOUND,
+            Error::MaxBufsizeExceeded => blosc2_sys::BLOSC2_ERROR_MAX_BUFSIZE_EXCEEDED,
+            Error::Tuner => blosc2_sys::BLOSC2_ERROR_TUNER,
         }
     }
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Failure => f.write_str("Generic failure"),
-            Error::Stream => f.write_str("Bad stream"),
-            Error::Data => f.write_str("Invalid data"),
-            Error::MemoryAlloc => f.write_str("Memory alloc/realloc failure"),
-            Error::ReadBuffer => f.write_str("Not enough space to read"),
-            Error::WriteBuffer => f.write_str("Not enough space to write"),
-            Error::CodecSupport => f.write_str("Codec not supported"),
-            Error::CodecParam => f.write_str("Invalid parameter supplied to codec"),
-            Error::CodecDict => f.write_str("Codec dictionary error"),
-            Error::VersionSupport => f.write_str("Version not supported"),
-            Error::InvalidHeader => f.write_str("Invalid value in header"),
-            Error::InvalidParam => f.write_str("Invalid parameter supplied to function"),
-            Error::FileRead => f.write_str("File read failure"),
-            Error::FileWrite => f.write_str("File write failure"),
-            Error::FileOpen => f.write_str("File open failure"),
-            Error::NotFound => f.write_str("Not found"),
-            Error::RunLength => f.write_str("Bad run length encoding"),
-            Error::FilterPipeline => f.write_str("Filter pipeline error"),
-            Error::ChunkInsert => f.write_str("Chunk insert failure"),
-            Error::ChunkAppend => f.write_str("Chunk append failure"),
-            Error::ChunkUpdate => f.write_str("Chunk update failure"),
-            Error::TwoGbLimit => f.write_str("Sizes larger than 2gb not supported"),
-            Error::SchunkCopy => f.write_str("Super-chunk copy failure"),
-            Error::FrameType => f.write_str("Wrong type for frame"),
-            Error::FileTruncate => f.write_str("File truncate failure"),
-            Error::ThreadCreate => f.write_str("Thread or thread context creation failure"),
-            Error::Postfilter => f.write_str("Postfilter failure"),
-            Error::FrameSpecial => f.write_str("Special frame failure"),
-            Error::SChunkSpecial => f.write_str("Special super-chunk failure"),
-            Error::PluginIO => f.write_str("IO plugin error"),
-            Error::FileRemove => f.write_str("Remove file failure"),
-            Error::NullPointer => f.write_str("Pointer is null"),
-            Error::InvalidIndex => f.write_str("Invalid index"),
-            Error::MetalayerNotFound => f.write_str("Metalayer has not been found"),
-            Error::MaxBufsizeExceeded => f.write_str("Maximum buffersize exceeded"),
-            Error::Tuner => f.write_str("Tuner failure"),
-        }
+        let err_str = unsafe { blosc2_sys::blosc2_error_string(self.to_int()) };
+        assert!(!err_str.is_null());
+        let len = unsafe { libc::strlen(err_str) };
+        let err_str: &'static [u8] = unsafe { std::slice::from_raw_parts(err_str.cast(), len + 1) };
+        let err_str = std::ffi::CStr::from_bytes_with_nul(err_str).unwrap();
+        let err_str = err_str.to_str().unwrap();
+        f.write_str(err_str)
     }
 }
 impl std::error::Error for Error {}

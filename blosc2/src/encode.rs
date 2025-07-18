@@ -175,7 +175,7 @@ impl Encoder {
 
     /// Get the compression parameters used by this encoder.
     pub fn params(&self) -> CParams {
-        let mut params = MaybeUninit::<blosc2_sys::blosc2_cparams>::uninit();
+        let mut params = MaybeUninit::uninit();
         unsafe {
             blosc2_sys::blosc2_ctx_get_cparams(self.ctx_ptr(), params.as_mut_ptr())
                 .into_result()
@@ -264,7 +264,7 @@ impl Decoder {
 
     /// Get the decompression parameters used by this decoder.
     pub fn params(&self) -> DParams {
-        let mut params = MaybeUninit::<blosc2_sys::blosc2_dparams>::uninit();
+        let mut params = MaybeUninit::uninit();
         unsafe {
             blosc2_sys::blosc2_ctx_get_dparams(self.ctx_ptr(), params.as_mut_ptr())
                 .into_result()
@@ -452,6 +452,7 @@ impl CParams {
     /// By default, a single `ByteShuffle` filter is applied.
     pub fn filters(&mut self, filters: &[Filter]) -> Result<&mut Self, Error> {
         if filters.len() > 6 {
+            crate::trace!("Too many filters, maximum is 6");
             return Err(Error::InvalidParam);
         }
         if filters.len() > 2 {

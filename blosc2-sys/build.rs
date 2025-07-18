@@ -50,7 +50,7 @@ fn build_c_lib() -> String {
                 "--depth",
                 "1",
                 "--branch",
-                "v2.19.0",
+                "v2.19.1",
                 "https://github.com/Blosc/c-blosc2.git",
                 ".",
             ])

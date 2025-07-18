@@ -92,8 +92,8 @@ impl SChunk {
 
     /// Serialize the super chunk to an in-memory buffer.
     pub fn to_buffer(&mut self) -> Result<CowVec<u8>, Error> {
-        let mut buffer = MaybeUninit::<*mut u8>::uninit();
-        let mut needs_free = MaybeUninit::<bool>::uninit();
+        let mut buffer = MaybeUninit::uninit();
+        let mut needs_free = MaybeUninit::uninit();
         let len = unsafe {
             blosc2_sys::blosc2_schunk_to_buffer(
                 self.0.as_ptr(),
@@ -220,8 +220,8 @@ impl SChunk {
 
     /// Get a chunk at the specified index from the super chunk.
     pub fn get_chunk(&mut self, index: usize) -> Result<Chunk, Error> {
-        let mut ptr = MaybeUninit::<*mut u8>::uninit();
-        let mut needs_free = MaybeUninit::<bool>::uninit();
+        let mut ptr = MaybeUninit::uninit();
+        let mut needs_free = MaybeUninit::uninit();
         let len = unsafe {
             blosc2_sys::blosc2_schunk_get_chunk(
                 self.0.as_ptr(),
@@ -321,14 +321,34 @@ impl SChunk {
 
     /// Get the compression parameters used by this super chunk.
     pub fn cparams(&self) -> CParams {
-        // TODO: use blosc2_schunk_get_cparams
-        CParams(unsafe { *self.0.as_ref().storage.as_ref().unwrap().cparams })
+        let mut params = MaybeUninit::uninit();
+        unsafe {
+            blosc2_sys::blosc2_schunk_get_cparams(self.0.as_ptr(), params.as_mut_ptr())
+                .into_result()
+                .unwrap();
+        }
+        let params = unsafe { params.assume_init() };
+
+        let mut ret = unsafe { *params };
+        ret.schunk = std::ptr::null_mut();
+        unsafe { libc::free(params as *mut _) };
+        CParams(ret)
     }
 
     /// Get the decompression parameters used by this super chunk.
     pub fn dparams(&self) -> DParams {
-        // TODO: use blosc2_schunk_get_dparams
-        DParams(unsafe { *self.0.as_ref().storage.as_ref().unwrap().dparams })
+        let mut params = MaybeUninit::uninit();
+        unsafe {
+            blosc2_sys::blosc2_schunk_get_dparams(self.0.as_ptr(), params.as_mut_ptr())
+                .into_result()
+                .unwrap();
+        }
+        let params = unsafe { params.assume_init() };
+
+        let mut ret = unsafe { *params };
+        ret.schunk = std::ptr::null_mut();
+        unsafe { libc::free(params as *mut _) };
+        DParams(ret)
     }
 
     // pub fn nbytes(&self) -> usize {
@@ -404,9 +424,22 @@ impl SChunk {
         idx: std::ops::Range<usize>,
         dst: &mut [MaybeUninit<u8>],
     ) -> Result<usize, Error> {
-        // TODO: should we add index checking here?
+        if idx.start > idx.end || idx.end > self.items_num() {
+            crate::trace!(
+                "Invalid index range: {}..{} for items_num: {}",
+                idx.start,
+                idx.end,
+                self.items_num()
+            );
+            return Err(Error::InvalidParam);
+        }
         let required_len = idx.len() * self.typesize();
         if dst.len() < required_len {
+            crate::trace!(
+                "Destination buffer is too small: {} bytes required, {} bytes provided",
+                required_len,
+                dst.len()
+            );
             return Err(Error::WriteBuffer);
         }
         unsafe {
@@ -434,6 +467,12 @@ impl SChunk {
     pub fn set_items(&mut self, idx: std::ops::Range<usize>, values: &[u8]) -> Result<(), Error> {
         let expected_length = idx.len() * self.typesize();
         if expected_length != values.len() {
+            crate::trace!(
+                "Expected {} bytes for {} items, got {} bytes",
+                expected_length,
+                idx.len(),
+                values.len()
+            );
             return Err(Error::InvalidParam);
         }
         unsafe {
