@@ -1,6 +1,6 @@
 [package]
 name = "blosc2"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 # println!("cargo::...")
 rust-version = "1.77.0"
@@ -23,3 +23,8 @@ tempfile = "3.13"
 [features]
 zlib = ["blosc2-sys/zlib"]
 zstd = ["blosc2-sys/zstd"]
+
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

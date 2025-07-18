@@ -1,4 +1,9 @@
 # blosc2-rs
+
+[![Crates.io](https://img.shields.io/crates/v/blosc2.svg)](https://crates.io/crates/blosc2/)
+[![Documentation](https://docs.rs/blosc2/badge.svg)](https://docs.rs/blosc2/)
+![License](https://img.shields.io/crates/l/blosc2)
+
 Rust bindings for blosc2 - a fast, compressed, persistent binary data store library.
 
 Provide a safe interface to the [blosc2](https://github.com/Blosc/c-blosc2) library, which is a
