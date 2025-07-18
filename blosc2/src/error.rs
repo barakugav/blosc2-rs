@@ -1,3 +1,9 @@
+/// Error codes for the blosc2 library.
+///
+/// Note that the error are codes that do not contain any additional information.
+/// For debugging purposes, you can set the environment variable `BLOSC_TRACE` to get many more
+/// trace prints that can help you understand what went wrong.
+
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {

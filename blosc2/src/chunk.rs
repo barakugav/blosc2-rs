@@ -5,6 +5,10 @@ use crate::error::ErrorCode;
 use crate::util::{validate_compressed_buf_and_get_sizes, CowVec};
 use crate::{DParams, Decoder, Error};
 
+/// A chunk of compressed data.
+///
+/// A chunk is a thin wrapper around `CowVec<u8>`, with some additional metadata, and the creation
+/// of a `Chunk` through the [`Self::from_compressed`] is very cheap.
 pub struct Chunk<'a> {
     pub(crate) buffer: CowVec<'a, u8>,
     pub(crate) nbytes: usize,
@@ -12,11 +16,7 @@ pub struct Chunk<'a> {
     pub(crate) decoder: RefCell<Option<Decoder>>,
 }
 impl<'a> Chunk<'a> {
-    pub fn from_data(data: &[u8]) -> Result<Self, Error> {
-        let buffer = crate::Encoder::new(Default::default())?.compress(data)?;
-        Self::from_compressed(buffer.into())
-    }
-
+    /// Create a new `Chunk` from a compressed bytes buffer.
     pub fn from_compressed(bytes: CowVec<'a, u8>) -> Result<Self, Error> {
         let (nbytes, _cbytes, _blocksize) =
             validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
@@ -36,18 +36,28 @@ impl<'a> Chunk<'a> {
             return Err(Error::Failure);
         }
 
-        Ok(Self {
-            buffer: bytes,
-            nbytes: nbytes as usize,
-            typesize,
-            decoder: RefCell::new(None),
-        })
+        Ok(unsafe { Self::from_compressed_unchecked(bytes, nbytes as usize, typesize) })
     }
 
+    pub(crate) unsafe fn from_compressed_unchecked(
+        bytes: CowVec<'a, u8>,
+        nbytes: usize,
+        typesize: usize,
+    ) -> Self {
+        Self {
+            buffer: bytes,
+            nbytes,
+            typesize,
+            decoder: RefCell::new(None),
+        }
+    }
+
+    /// Get a reference to the underlying bytes buffer.
     pub fn as_bytes(&self) -> &[u8] {
         self.buffer.as_slice()
     }
 
+    /// Convert the chunk into a bytes buffer.
     pub fn into_bytes(self) -> CowVec<'a, u8> {
         self.buffer
     }
@@ -60,6 +70,7 @@ impl<'a> Chunk<'a> {
         Ok(std::cell::RefMut::map(decoder, |d| d.as_mut().unwrap()))
     }
 
+    /// Get the current decompression parameters.
     pub fn get_dparams(&self) -> DParams {
         self.decoder
             .borrow()
@@ -68,23 +79,31 @@ impl<'a> Chunk<'a> {
             .unwrap_or_default()
     }
 
+    /// Set the decompression parameters.
     pub fn set_dparams(&self, params: DParams) -> Result<(), Error> {
         *self.decoder.borrow_mut() = Some(Decoder::new(params)?);
         Ok(())
     }
 
+    /// Decompress the whole chunk into a new allocated bytes vector.
+    ///
+    /// For decompressing the data into an already allocated buffer, create a `Decoder`
+    /// (with other params or [`Self::get_dparams`]) and use [`Decoder::decompress_into`].
     pub fn decompress(&self) -> Result<Vec<u8>, Error> {
         self.decoder_mut()?.decompress(self.buffer.as_slice())
     }
 
+    /// Get the number of bytes in the *uncompressed* data.
     pub fn nbytes(&self) -> usize {
         self.nbytes
     }
 
+    /// Get the size of each item in the chunk.
     pub fn typesize(&self) -> usize {
         self.typesize
     }
 
+    /// Get the number of items in the chunk.
     pub fn items_num(&self) -> usize {
         self.nbytes / self.typesize
     }
@@ -158,6 +177,7 @@ impl<'a> Chunk<'a> {
         })
     }
 
+    /// Create a shallow clone of the chunk without re-allocating the internal buffer.
     pub fn shallow_clone(&self) -> Chunk {
         Chunk {
             buffer: CowVec::Borrowed(self.buffer.as_slice()),
@@ -203,11 +223,10 @@ pub(crate) mod tests {
 
             let len = rand_src_len(cparams.get_typesize(), &mut rand);
             let data = rand_chunk_data(len, &mut rand);
-            let buffer = Encoder::new(cparams.clone())
+            let chunk = Encoder::new(cparams.clone())
                 .unwrap()
                 .compress(&data)
                 .unwrap();
-            let chunk = Chunk::from_compressed(buffer.into()).unwrap();
 
             chunk.set_dparams(dparams).unwrap();
             assert_eq!(cparams.get_typesize(), chunk.typesize());
@@ -237,8 +256,7 @@ pub(crate) mod tests {
 
     pub(crate) fn rand_chunk(size: usize, params: CParams, rand: &mut StdRng) -> Chunk<'static> {
         let data = rand_chunk_data(size, rand);
-        let buffer = Encoder::new(params).unwrap().compress(&data).unwrap();
-        Chunk::from_compressed(buffer.into()).unwrap()
+        Encoder::new(params).unwrap().compress(&data).unwrap()
     }
 
     pub(crate) fn rand_chunk_data(size: usize, rand: &mut StdRng) -> Vec<u8> {
