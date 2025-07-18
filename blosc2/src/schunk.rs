@@ -240,6 +240,10 @@ impl SChunk {
     }
 
     /// Decompress a chunk at the specified index into a new allocated bytes vector.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied into the destination buffer.
     pub fn decompress_chunk_into(
         &mut self,
         index: usize,
@@ -389,6 +393,10 @@ impl SChunk {
     ///
     /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
     /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied into the destination buffer.
     pub fn item_into(&self, idx: usize, dst: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
         self.items_into(idx..idx + 1, dst)
     }
@@ -419,6 +427,10 @@ impl SChunk {
     ///
     /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
     /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied into the destination buffer.
     pub fn items_into(
         &self,
         idx: std::ops::Range<usize>,

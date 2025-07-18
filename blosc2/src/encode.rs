@@ -50,6 +50,10 @@ impl Encoder {
     }
 
     /// Compress the given bytes into a pre-allocated buffer.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied into the destination buffer.
     pub fn compress_into(
         &mut self,
         src: &[u8],
@@ -116,6 +120,10 @@ impl Encoder {
     ///
     /// This function is similar to [`Encoder::compress_repeatval`], but allows you to provide a
     /// pre-allocated buffer to store the compressed data.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied into the destination buffer.
     pub fn compress_repeatval_into(
         &self,
         count: usize,
@@ -243,6 +251,10 @@ impl Decoder {
     }
 
     /// Decompress the given bytes into a pre-allocated buffer.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes copied into the destination buffer.
     pub fn decompress_into(
         &mut self,
         src: &[u8],
