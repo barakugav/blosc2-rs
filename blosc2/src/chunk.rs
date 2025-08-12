@@ -186,7 +186,7 @@ impl<'a> Chunk<'a> {
     }
 
     /// Create a shallow clone of the chunk without re-allocating the internal buffer.
-    pub fn shallow_clone(&self) -> Chunk {
+    pub fn shallow_clone(&self) -> Chunk<'_> {
         Chunk {
             buffer: CowVec::Borrowed(self.buffer.as_slice()),
             nbytes: self.nbytes,

@@ -91,7 +91,7 @@ impl SChunk {
     }
 
     /// Serialize the super chunk to an in-memory buffer.
-    pub fn to_buffer(&mut self) -> Result<CowVec<u8>, Error> {
+    pub fn to_buffer(&mut self) -> Result<CowVec<'_, u8>, Error> {
         let mut buffer = MaybeUninit::uninit();
         let mut needs_free = MaybeUninit::uninit();
         let len = unsafe {
@@ -219,7 +219,7 @@ impl SChunk {
     }
 
     /// Get a chunk at the specified index from the super chunk.
-    pub fn get_chunk(&mut self, index: usize) -> Result<Chunk, Error> {
+    pub fn get_chunk(&mut self, index: usize) -> Result<Chunk<'_>, Error> {
         let mut ptr = MaybeUninit::uninit();
         let mut needs_free = MaybeUninit::uninit();
         let len = unsafe {
