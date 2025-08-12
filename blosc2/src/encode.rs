@@ -624,7 +624,7 @@ mod tests {
                     RepeatedValue::Nan => match typesize {
                         4 => assert!(f32::from_ne_bytes(item.try_into().unwrap()).is_nan()),
                         8 => assert!(f64::from_ne_bytes(item.try_into().unwrap()).is_nan()),
-                        _ => panic!("Unexpected typesize for NaN: {}", typesize),
+                        _ => panic!("Unexpected typesize for NaN: {typesize}"),
                     },
                     RepeatedValue::Uninit => {}
                     RepeatedValue::Value(v) => assert_eq!(item, v),
