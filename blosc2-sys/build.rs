@@ -1,14 +1,11 @@
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 
 fn main() {
     generate_bindings();
 
     // Build and link
-    if std::env::var("DOCS_RS").is_err() {
-        let lib_name = build_c_lib();
-        println!("cargo::rustc-link-lib=static={lib_name}");
-    }
+    let lib_name = build_c_lib();
+    println!("cargo::rustc-link-lib=static={lib_name}");
 }
 
 fn generate_bindings() {
@@ -37,29 +34,17 @@ fn generate_bindings() {
 fn build_c_lib() -> String {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
 
+    let blosc_orig_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("third-party")
+        .join("c-blosc2");
+    println!("cargo::rerun-if-changed={}", blosc_orig_dir.display());
+
+    // copy blosc_dir to OUT_DIR.
+    // Required because the build process modify the sources, and we are not allowed to modify any
+    // files outside of OUT_DIR.
     let blosc_dir = out_dir.join("c-blosc2");
     if !blosc_dir.exists() {
-        Command::new("git")
-            .arg("--version")
-            .status()
-            .expect("git not found");
-        std::fs::create_dir_all(&blosc_dir).expect("Failed to create c-blosc2 directory");
-        Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                "v2.20.0",
-                "https://github.com/Blosc/c-blosc2.git",
-                ".",
-            ])
-            .current_dir(&blosc_dir)
-            .status()
-            .inspect_err(|_| {
-                let _ = std::fs::remove_dir_all(&blosc_dir);
-            })
-            .expect("Failed to clone c-blosc2 repository");
+        copy_recursively(&blosc_orig_dir, &blosc_dir).unwrap();
     }
 
     let mut build = cmake::Config::new(&blosc_dir);
@@ -90,4 +75,17 @@ fn build_c_lib() -> String {
         lib_dir.to_str().unwrap()
     );
     libname.to_string()
+}
+
+fn copy_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
+    if src.is_file() {
+        std::fs::copy(src, dst)?;
+    } else {
+        std::fs::create_dir(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_recursively(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
