@@ -12,10 +12,6 @@ use crate::{CParams, Chunk, DParams, Error};
 /// chunks or data to it. It support random access to either chunks or items in the chunks.
 pub struct SChunk(NonNull<blosc2_sys::blosc2_schunk>);
 impl SChunk {
-    fn from_ptr(ptr: *mut blosc2_sys::blosc2_schunk) -> Result<Self, Error> {
-        Ok(Self(NonNull::new(ptr).ok_or(Error::Failure)?))
-    }
-
     /// Create a new in-memory super chunk.
     ///
     /// The created super chunk will not be contiguous. See [`Self::new`] for more details.
@@ -61,7 +57,8 @@ impl SChunk {
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
             io: std::ptr::null_mut(),
         };
-        Self::from_ptr(unsafe { blosc2_sys::blosc2_schunk_new(&mut storage as *mut _) })
+        let schunk = unsafe { blosc2_sys::blosc2_schunk_new(&mut storage as *mut _) };
+        unsafe { Self::from_raw_ptr(schunk.cast()) }
     }
 
     /// Open an existing super chunk from the specified path.
@@ -72,9 +69,10 @@ impl SChunk {
     /// Open an existing super chunk from the specified path with an offset.
     pub fn open_with_offset(urlpath: &Path, offset: usize) -> Result<Self, Error> {
         let urlpath = path2cstr(urlpath);
-        Self::from_ptr(unsafe {
+        let schunk = unsafe {
             blosc2_sys::blosc2_schunk_open_offset(urlpath.as_ptr().cast_mut(), offset as _)
-        })
+        };
+        unsafe { Self::from_raw_ptr(schunk.cast()) }
     }
 
     /// Create a super chunk from an existing in-memory buffer.
@@ -87,7 +85,7 @@ impl SChunk {
                 !buffer.ownership_moved(),
             )
         };
-        Self::from_ptr(schunk)
+        unsafe { Self::from_raw_ptr(schunk.cast()) }
     }
 
     /// Serialize the super chunk to an in-memory buffer.
@@ -126,6 +124,40 @@ impl SChunk {
             }
         }
         Ok(())
+    }
+
+    /// Create a new super chunk from a raw pointer.
+    ///
+    /// The ownership of the underlying memory is transferred to the new super chunk, and it will be freed once
+    /// the super chunk is dropped using `blosc2_sys::blosc2_schunk_free`.
+    ///
+    /// This function can be useful if a user wants to accept a schunk across ffi boundaries.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that the pointer is valid and points to a valid `blosc2_sys::blosc2_schunk`, and that
+    /// no other references to the same memory exist.
+    pub unsafe fn from_raw_ptr(ptr: *mut ()) -> Result<Self, Error> {
+        Ok(Self(NonNull::new(ptr.cast()).ok_or(Error::Failure)?))
+    }
+
+    /// Convert the super chunk into a raw pointer of the underlying `blosc2_sys::blosc2_schunk`.
+    ///
+    /// The ownership of the underlying C schunk is passed to the caller, and it should be freed using
+    /// `blosc2_sys::blosc2_schunk_free`.
+    ///
+    /// This function can be useful if a user wants to pass the schunk across ffi boundaries.
+    pub fn into_raw_ptr(self) -> *mut () {
+        let ptr = self.0.as_ptr().cast();
+        std::mem::forget(self);
+        ptr
+    }
+
+    /// Get a raw pointer to the underlying `blosc2_sys::blosc2_schunk`.
+    ///
+    /// This function can be useful if a user wants to pass the schunk across ffi boundaries.
+    pub fn as_raw_ptr(&self) -> *const () {
+        self.0.as_ptr().cast()
     }
 
     /// Append (uncompressed) data to the super chunk as a new chunk.
@@ -315,7 +347,7 @@ impl SChunk {
         };
 
         let schunk = unsafe { blosc2_sys::blosc2_schunk_copy(self.0.as_ptr(), &mut storage) };
-        Self::from_ptr(schunk)
+        unsafe { Self::from_raw_ptr(schunk.cast()) }
     }
 
     /// Get the number of chunks in the super chunk.
