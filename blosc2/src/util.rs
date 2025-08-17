@@ -198,6 +198,67 @@ pub(crate) fn path2cstr(path: &Path) -> CString {
         .expect("failed to convert path to cstr")
 }
 
+pub(crate) struct ArrayVec<T, const N: usize> {
+    data: [MaybeUninit<T>; N],
+    len: usize,
+}
+impl<T, const N: usize> ArrayVec<T, N> {
+    fn new() -> Self {
+        Self {
+            data: unsafe { MaybeUninit::uninit().assume_init() },
+            len: 0,
+        }
+    }
+    pub(crate) fn from_slice(slice: &[T]) -> Option<Self>
+    where
+        T: Copy,
+    {
+        Self::from_slice_fn(slice, |item| *item)
+    }
+    pub(crate) fn from_slice_fn<U>(slice: &[U], f: impl Fn(&U) -> T) -> Option<Self> {
+        if slice.len() > N {
+            return None;
+        }
+        let mut arr = Self::new();
+        for (i, item) in slice.iter().enumerate() {
+            arr.data[i].write(f(item));
+        }
+        arr.len = slice.len();
+        Some(arr)
+    }
+    pub(crate) fn as_slice(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const T, self.len) }
+    }
+}
+impl<T, const N: usize> Drop for ArrayVec<T, N> {
+    fn drop(&mut self) {
+        for i in 0..self.len {
+            unsafe {
+                self.data[i].assume_init_drop();
+            }
+        }
+    }
+}
+impl<T, const N: usize> Clone for ArrayVec<T, N>
+where
+    T: Copy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data,
+            len: self.len,
+        }
+    }
+}
+impl<T, const N: usize> std::fmt::Debug for ArrayVec<T, N>
+where
+    T: std::fmt::Debug + Copy,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.as_slice(), f)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::num::NonZeroUsize;
