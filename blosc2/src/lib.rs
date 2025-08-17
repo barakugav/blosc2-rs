@@ -127,6 +127,9 @@ pub use chunk::*;
 mod schunk;
 pub use schunk::*;
 
+mod ndarray;
+pub use ndarray::*;
+
 mod global;
 pub mod util;
 

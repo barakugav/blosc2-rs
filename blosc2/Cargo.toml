@@ -15,6 +15,9 @@ categories = ["compression", "external-ffi-bindings"]
 [dependencies]
 blosc2-sys = { package = "blosc2-rs-sys", path = "../blosc2-sys", version = "0.1.2" }
 libc = "0.2"
+cfg-if = "1.0.0"
+half = { version = "2.4", default-features = false, optional = true }
+num-complex = { version = "0.4", default-features = false, optional = true }
 
 [dev-dependencies]
 rand = "0.9"
@@ -23,6 +26,8 @@ tempfile = "3.13"
 [features]
 zlib = ["blosc2-sys/zlib"]
 zstd = ["blosc2-sys/zstd"]
+half = ["dep:half"]
+num-complex = ["dep:num-complex"]
 
 
 [package.metadata.docs.rs]
