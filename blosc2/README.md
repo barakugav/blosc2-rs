@@ -61,7 +61,7 @@ let i32len = std::mem::size_of::<i32>();
 let cparams = CParams::default()
     .typesize(i32len.try_into().unwrap())
     .clone();
-let mut schunk = SChunk::new_in_memory(cparams.clone(), DParams::default()).unwrap();
+let mut schunk = SChunk::new(cparams.clone(), DParams::default()).unwrap();
 
 // Create two data arrays
 let data1: [i32; 7] = [1, 2, 3, 4, 5, 6, 7];

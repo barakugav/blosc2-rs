@@ -106,8 +106,8 @@ impl_dtyped_scalar!(u64, "u8");
 impl_dtyped_scalar!(f16, "f2");
 impl_dtyped_scalar!(f32, "f4");
 impl_dtyped_scalar!(f64, "f8");
-impl_dtyped_scalar!(Complex<f32>, "c4");
-impl_dtyped_scalar!(Complex<f64>, "c8");
+impl_dtyped_scalar!(Complex<f32>, "c8");
+impl_dtyped_scalar!(Complex<f64>, "c16");
 impl_dtyped_scalar!(bool, "b1");
 
 cfg_if::cfg_if! { if #[cfg(feature = "half")] {
@@ -144,7 +144,7 @@ cfg_if::cfg_if! { if #[cfg(feature = "num-complex")] {
     ///
     /// `Complex<T>` is memory layout compatible with an array `[T; 2]`, which is compatible with
     /// libc, numpy, etc.
-    #[derive(Copy, Clone, Debug, Default)]
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
     #[repr(C)]
     pub struct Complex<T> {
         /// Real portion of the complex number
@@ -588,7 +588,7 @@ fn ceil_to_multiple(x: usize, m: usize) -> usize {
     x.div_ceil(m) * m
 }
 
-fn scalar_dtype(kind: DtypeScalarKind) -> Dtype {
+pub(crate) fn scalar_dtype(kind: DtypeScalarKind) -> Dtype {
     let native_endianness = if cfg!(target_endian = "little") {
         Endianness::Little
     } else {

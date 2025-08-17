@@ -9,7 +9,7 @@ pub struct NdarrayParams {
     pub(crate) cparams: CParams,
     pub(crate) dparams: DParams,
     shape: Option<DimVec<i64>>,
-    chunksize: Option<DimVec<i32>>,
+    chunkshape: Option<DimVec<i32>>,
     blockshape: Option<DimVec<i32>>,
     dtype: Option<(Dtype, CString)>,
 }
@@ -24,7 +24,7 @@ impl NdarrayParams {
             cparams: CParams::default(),
             dparams: DParams::default(),
             shape: None,
-            chunksize: None,
+            chunkshape: None,
             blockshape: None,
             dtype: None,
         }
@@ -37,13 +37,10 @@ impl NdarrayParams {
         self.dparams = dparams;
         self
     }
-    pub fn shape(&mut self, shape: &[i64]) -> Result<&mut Self, Error> {
-        let shape = DimVec::from_slice(shape).ok_or_else(|| {
-            crate::trace!("Too many dimensions: {}", shape.len());
-            Error::InvalidParam
-        })?;
+    pub fn shape(&mut self, shape: &[usize]) -> &mut Self {
+        let shape = DimVec::from_slice_fn(shape, |s| *s as i64).expect("Too many dimensions");
         self.shape = Some(shape);
-        Ok(self)
+        self
     }
     pub(crate) fn shape_required(&self) -> Result<&DimVec<i64>, Error> {
         self.shape.as_ref().ok_or_else(|| {
@@ -51,27 +48,23 @@ impl NdarrayParams {
             Error::InvalidParam
         })
     }
-    pub fn chunksize(&mut self, chunksize: &[i32]) -> Result<&mut Self, Error> {
-        let chunksize = DimVec::from_slice(chunksize).ok_or_else(|| {
-            crate::trace!("Too many dimensions: {}", chunksize.len());
-            Error::InvalidParam
-        })?;
-        self.chunksize = Some(chunksize);
-        Ok(self)
+    pub fn chunkshape(&mut self, chunkshape: &[usize]) -> &mut Self {
+        let chunkshape =
+            DimVec::from_slice_fn(chunkshape, |s| *s as i32).expect("Too many dimensions");
+        self.chunkshape = Some(chunkshape);
+        self
     }
-    pub(crate) fn chunksize_required(&self) -> Result<&DimVec<i32>, Error> {
-        self.chunksize.as_ref().ok_or_else(|| {
+    pub(crate) fn chunkshape_required(&self) -> Result<&DimVec<i32>, Error> {
+        self.chunkshape.as_ref().ok_or_else(|| {
             crate::trace!("Chunkshape is required");
             Error::InvalidParam
         })
     }
-    pub fn blockshape(&mut self, blockshape: &[i32]) -> Result<&mut Self, Error> {
-        let blockshape = DimVec::from_slice(blockshape).ok_or_else(|| {
-            crate::trace!("Too many dimensions: {}", blockshape.len());
-            Error::InvalidParam
-        })?;
+    pub fn blockshape(&mut self, blockshape: &[usize]) -> &mut Self {
+        let blockshape =
+            DimVec::from_slice_fn(blockshape, |s| *s as i32).expect("Too many dimensions");
         self.blockshape = Some(blockshape);
-        Ok(self)
+        self
     }
     pub(crate) fn blockshape_required(&self) -> Result<&DimVec<i32>, Error> {
         self.blockshape.as_ref().ok_or_else(|| {
@@ -81,10 +74,18 @@ impl NdarrayParams {
     }
     pub fn dtype(&mut self, dtype: &str) -> Result<&mut Self, Error> {
         let dtype_cstr = CString::new(dtype).map_err(|_| Error::InvalidParam)?;
-        let dtype = Dtype::try_from(dtype).map_err(|_| {
-            crate::trace!("Invalid dtype: {}", dtype);
+        let dtype = Dtype::try_from(dtype).map_err(|e| {
+            crate::trace!("Invalid dtype: '{}', error: {}", dtype, e);
             Error::InvalidParam
         })?;
+        if dtype.itemsize > blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
+            crate::trace!(
+                "Itemsize {} is greater than BLOSC_MAX_TYPESIZE {}",
+                dtype.itemsize,
+                blosc2_sys::BLOSC_MAX_TYPESIZE
+            );
+            return Err(Error::InvalidParam);
+        }
         self.dtype = Some((dtype, dtype_cstr));
         Ok(self)
     }
