@@ -30,7 +30,7 @@ impl Ndarray {
     ) -> Result<Self, Error> {
         let mut cparams = params.cparams.clone();
         let mut dparams = params.dparams.clone();
-        let chunkshape = params.chunksize_required()?;
+        let chunkshape = params.chunkshape_required()?;
         let blockshape = params.blockshape_required()?;
 
         let (shape, dtype, dtype_cstr) = match &value {
@@ -54,7 +54,20 @@ impl Ndarray {
             crate::trace!("Zero itemsize is not supported");
             Error::InvalidParam
         })?;
+        if dtype.itemsize > blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
+            crate::trace!(
+                "Itemsize {} is greater than BLOSC_MAX_TYPESIZE {}",
+                dtype.itemsize,
+                blosc2_sys::BLOSC_MAX_TYPESIZE
+            );
+            return Err(Error::InvalidParam);
+        }
         cparams.typesize(itemsize);
+
+        if shape.is_empty() {
+            crate::trace!("Zero-dim ndarray are not supported");
+            return Err(Error::InvalidParam);
+        }
 
         crate::global::global_init();
 
@@ -227,13 +240,13 @@ impl Ndarray {
             );
             return Err(Error::InvalidParam);
         }
-        let shape = DimVec::from_slice_fn(ndarray.shape(), |s| *s as i64);
+        let shape = DimVec::from_slice(ndarray.shape());
         // Safety: we know ndim <= MAX_DIM
         let shape = unsafe { shape.unwrap_unchecked() };
 
         let mut params = params.clone();
         params.dtype(T::dtype_numpy_str())?;
-        params.shape(shape.as_slice())?;
+        params.shape(shape.as_slice());
 
         let data = ndarray.as_standard_layout();
         let data = data
@@ -252,8 +265,8 @@ impl Ndarray {
 
         let dtype_cstr = unsafe { std::ffi::CStr::from_ptr((&*ptr.as_ptr()).dtype) };
         let dtype = dtype_cstr.to_str().unwrap();
-        let dtype = Dtype::try_from(dtype).map_err(|_| {
-            crate::trace!("Invalid dtype: {}", dtype);
+        let dtype = Dtype::try_from(dtype).map_err(|e| {
+            crate::trace!("Invalid dtype: '{}', error: {}", dtype, e);
             Error::InvalidParam
         })?;
 
@@ -439,7 +452,7 @@ impl Ndarray {
 
         let mut cparams = params.cparams.clone();
         let mut dparams = params.dparams.clone();
-        let chunkshape = params.chunksize_required()?;
+        let chunkshape = params.chunkshape_required()?;
         let blockshape = params.blockshape_required()?;
         let itemsize = NonZeroUsize::new(self.dtype.itemsize).ok_or_else(|| {
             crate::trace!("Zero itemsize is not supported");
@@ -743,19 +756,25 @@ impl Drop for Ndarray {
 #[cfg(test)]
 mod tests {
 
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use rand::distr::weighted::WeightedIndex;
+    use rand::prelude::*;
+
+    use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
+
     use super::*;
 
     #[cfg(feature = "ndarray")]
     #[test]
-    fn test_new() {
+    fn new_simple() {
         let array1 = ndarray::array!([[1_i32, 2], [3, 4],]);
         let b2nd = Ndarray::from_ndarray(
             &array1,
             &NdarrayParams::default()
                 .blockshape(&[1, 1, 1])
-                .unwrap()
-                .chunksize(&[1, 1, 1])
-                .unwrap(),
+                .chunkshape(&[1, 1, 1]),
         )
         .unwrap();
 
@@ -764,5 +783,1031 @@ mod tests {
 
         let array3: ndarray::Array3<i32> = b2nd.to_ndarray().unwrap();
         assert_eq!(array1.view().into_dyn(), array3.view().into_dyn());
+    }
+
+    #[test]
+    fn round_trip() {
+        let mut rand = StdRng::seed_from_u64(0xae360b0cc77f052f);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+            let storage = rand_storage(&mut rand);
+            let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+
+            assert_eq!(
+                shape,
+                array
+                    .shape()
+                    .iter()
+                    .map(|s| *s as usize)
+                    .collect::<Vec<_>>()
+            );
+            let array_data = array.to_items().unwrap();
+            assert_eq!(data, array_data);
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[repr(C, packed)]
+    struct Point {
+        x: i32,
+        y: u32,
+        z: i32,
+    }
+    unsafe impl Dtyped for Point {
+        fn dtype_numpy_str() -> &'static str {
+            "[('x', '<i4'), ('y', '<u4'), ('z', '<i4')]"
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[repr(C, packed)]
+    struct Person {
+        height: i32,
+        weights: i64,
+    }
+    unsafe impl Dtyped for Person {
+        fn dtype_numpy_str() -> &'static str {
+            "[('height', '<i4'), ('weights', '<i8')]"
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[repr(C)]
+    struct PersonAligned {
+        height: i32,
+        weight: i64,
+    }
+    unsafe impl Dtyped for PersonAligned {
+        fn dtype_numpy_str() -> &'static str {
+            "{'names':['height','weight'], 'formats':['<i4', '<i8'], 'aligned':True}"
+        }
+    }
+
+    #[test]
+    fn new_repeated_value() {
+        let mut rand = StdRng::seed_from_u64(0x4a551bfb4793837b);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let storage = rand_storage(&mut rand);
+            let value = (&mut rand)
+                .random_iter()
+                .take(dtype.itemsize)
+                .collect::<Vec<_>>();
+            let value = {
+                let values = [
+                    NdarrayInitValue::Zeros,
+                    NdarrayInitValue::Uninit,
+                    NdarrayInitValue::RepeatedValue(&value),
+                ];
+                values.choose(&mut rand).unwrap().clone()
+            };
+            let array = Ndarray::new_at(&value, storage.params(), &params).unwrap();
+
+            assert_eq!(
+                shape,
+                array
+                    .shape()
+                    .iter()
+                    .map(|s| *s as usize)
+                    .collect::<Vec<_>>()
+            );
+            let array_data = array.to_items().unwrap();
+            assert_eq!(
+                array_data.len(),
+                dtype.itemsize * shape.iter().product::<usize>()
+            );
+            match value {
+                NdarrayInitValue::Zeros => assert!(array_data.iter().all(|&b| b == 0)),
+                NdarrayInitValue::Uninit => {}
+                NdarrayInitValue::RepeatedValue(items) => assert!(array_data
+                    .chunks_exact(dtype.itemsize)
+                    .all(|chunk| chunk == items)),
+                NdarrayInitValue::Nans => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn new_from_items() {
+        let mut rand = StdRng::seed_from_u64(0x5ac98edb0400b82f);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let storage = rand_storage(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+            let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+
+            assert_eq!(
+                shape,
+                array
+                    .shape()
+                    .iter()
+                    .map(|s| *s as usize)
+                    .collect::<Vec<_>>()
+            );
+            let array_data = array.to_items().unwrap();
+            assert_eq!(data, array_data);
+        }
+    }
+
+    macro_rules! assert_arr_eq_nan {
+        ($left:expr, $right:expr $(,)?) => {{
+            assert!(ndarray_util::ndarray_eq_nan($left, $right), )
+        }};
+        ($left:expr, $right:expr, $($arg:tt)*) => {{
+            assert!(ndarray_util::ndarray_eq_nan($left, $right), $($arg)+)
+        }};
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[test]
+    fn new_from_ndarray() {
+        fn test_impl<T>(repeat: usize, rand: &mut impl Rng)
+        where
+            T: Dtyped + PartialEq + std::fmt::Debug,
+        {
+            for _ in 0..repeat {
+                let dtype = Dtype::try_from(T::dtype_numpy_str()).unwrap();
+                let (shape, params) = rand_params_with_dtype(&dtype, rand);
+                let storage = rand_storage(rand);
+                let array_orig = rand_ndarray::<T>(&shape, rand);
+                let array =
+                    Ndarray::from_ndarray_at(&array_orig, storage.params(), &params).unwrap();
+
+                assert_eq!(
+                    shape,
+                    array
+                        .shape()
+                        .iter()
+                        .map(|s| *s as usize)
+                        .collect::<Vec<_>>()
+                );
+                let array_new: ndarray::ArrayD<T> = array.to_ndarray().unwrap();
+                assert_arr_eq_nan!(&array_orig, &array_new);
+            }
+        }
+
+        let mut rand = StdRng::seed_from_u64(0x74970cbc6e4c8b4b);
+        for i in 0..=16 {
+            match i {
+                0 => test_impl::<i8>(1, &mut rand),
+                2 => test_impl::<i16>(1, &mut rand),
+                4 => test_impl::<i32>(8, &mut rand),
+                6 => test_impl::<i64>(8, &mut rand),
+                1 => test_impl::<u8>(1, &mut rand),
+                3 => test_impl::<u16>(1, &mut rand),
+                5 => test_impl::<u32>(1, &mut rand),
+                7 => test_impl::<u64>(1, &mut rand),
+                8 => {
+                    cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                        // need the half crate to implement PartialEq for f16
+                        test_impl::<f16>(1, &mut rand);
+                    } }
+                }
+                9 => test_impl::<f32>(8, &mut rand),
+                10 => test_impl::<f64>(8, &mut rand),
+                11 => test_impl::<Complex<f32>>(2, &mut rand),
+                12 => test_impl::<Complex<f64>>(2, &mut rand),
+                13 => test_impl::<bool>(1, &mut rand),
+                14 => test_impl::<Point>(3, &mut rand),
+                15 => test_impl::<Person>(2, &mut rand),
+                16 => test_impl::<PersonAligned>(2, &mut rand),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn save_open() {
+        let mut rand = StdRng::seed_from_u64(0xe62c3a15347c0cf0);
+        for _ in 0..30 {
+            let temp_dir = tempfile::TempDir::new().unwrap();
+            let path = temp_dir.path().join("test.b2nd");
+
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+
+            let padding = rand.random::<bool>().then(|| {
+                let padding = rand.random_range(0..=4096);
+                std::fs::write(&path, vec![0; padding]).unwrap();
+                padding
+            });
+            {
+                let array = Ndarray::from_items_buf(&data, &params).unwrap();
+                let written_offset = array.save(&path, padding.is_some()).unwrap();
+                assert_eq!(written_offset, padding.unwrap_or(0) as u64);
+            }
+
+            let array = if let Some(padding) = padding {
+                Ndarray::open_with_offset(&path, padding).unwrap()
+            } else {
+                Ndarray::open(&path).unwrap()
+            };
+
+            assert_eq!(
+                shape,
+                array
+                    .shape()
+                    .iter()
+                    .map(|s| *s as usize)
+                    .collect::<Vec<_>>()
+            );
+            let array_data = array.to_items().unwrap();
+            assert_eq!(data, array_data);
+        }
+    }
+
+    #[test]
+    fn copy() {
+        let mut rand = StdRng::seed_from_u64(0xa2c6877c4f542c7e);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let storage = rand_storage(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+            let array1 = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+
+            let params2 = loop {
+                let (_shape2, _dtype2, params2) = rand_params(&mut rand);
+                if params2.shape_required().unwrap().as_slice().len() == shape.len() {
+                    break params2;
+                }
+            };
+            let storage2 = rand_storage(&mut rand);
+            let array2 = array1.copy_to(storage2.params(), &params2).unwrap();
+
+            assert_eq!(array1.shape(), array2.shape());
+            assert_eq!(array1.dtype_str(), array2.dtype_str());
+            assert_eq!(array1.to_items().unwrap(), array2.to_items().unwrap());
+        }
+    }
+
+    #[cfg(feature = "ndarray")]
+    #[test]
+    fn slice() {
+        fn test_impl<T>(repeat: usize, rand: &mut impl Rng)
+        where
+            T: Dtyped + PartialEq + std::fmt::Debug,
+        {
+            for _ in 0..repeat {
+                let dtype = Dtype::try_from(T::dtype_numpy_str()).unwrap();
+                let (shape, params) = rand_params_with_dtype(&dtype, rand);
+                let storage = rand_storage(rand);
+                let array_orig = rand_ndarray::<T>(&shape, rand);
+                let array =
+                    Ndarray::from_ndarray_at(&array_orig, storage.params(), &params).unwrap();
+
+                for _ in 0..10 {
+                    let slice = shape
+                        .iter()
+                        .map(|&s| {
+                            let begin = rand.random_range(0..=s);
+                            let end = rand.random_range(begin..=s);
+                            begin..end
+                        })
+                        .collect::<Vec<_>>();
+                    let slice_data: ndarray::ArrayD<T> = array.slice(&slice).unwrap();
+
+                    let slice_data_expected = ndarray::ArrayD::from_shape_fn(
+                        slice.iter().map(|r| r.len()).collect::<Vec<_>>(),
+                        |indices| {
+                            let index = slice
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| r.start + indices[i])
+                                .collect::<Vec<_>>();
+                            array_orig[index.as_slice()]
+                        },
+                    );
+                    assert_eq!(slice_data_expected.shape(), slice_data.shape());
+                    assert_eq!(slice_data_expected, slice_data);
+                }
+            }
+        }
+
+        let mut rand = StdRng::seed_from_u64(0x1a55f4aca9291cef);
+        for i in 0..=16 {
+            match i {
+                0 => test_impl::<i8>(1, &mut rand),
+                2 => test_impl::<i16>(1, &mut rand),
+                4 => test_impl::<i32>(8, &mut rand),
+                6 => test_impl::<i64>(8, &mut rand),
+                1 => test_impl::<u8>(1, &mut rand),
+                3 => test_impl::<u16>(1, &mut rand),
+                5 => test_impl::<u32>(1, &mut rand),
+                7 => test_impl::<u64>(1, &mut rand),
+                8 => {
+                    cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                        // need the half crate to implement PartialEq for f16
+                        test_impl::<f16>(1, &mut rand);
+                    } }
+                }
+                9 => test_impl::<f32>(8, &mut rand),
+                10 => test_impl::<f64>(8, &mut rand),
+                11 => test_impl::<Complex<f32>>(2, &mut rand),
+                12 => test_impl::<Complex<f64>>(2, &mut rand),
+                13 => test_impl::<bool>(1, &mut rand),
+                14 => test_impl::<Point>(3, &mut rand),
+                15 => test_impl::<Person>(2, &mut rand),
+                16 => test_impl::<PersonAligned>(2, &mut rand),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    fn default_strides(shape: &[usize], itemsize: usize) -> Vec<isize> {
+        let mut strides = shape
+            .iter()
+            .rev()
+            .scan(itemsize, |acc, s| {
+                let stride = *acc;
+                *acc *= s;
+                Some(stride as isize)
+            })
+            .collect::<Vec<_>>();
+        strides.reverse();
+        strides
+    }
+
+    fn index2offset(index: &[usize], strides: &[isize]) -> isize {
+        index
+            .iter()
+            .zip(strides)
+            .map(|(idx, stride)| (*idx as isize) * stride)
+            .sum()
+    }
+
+    #[test]
+    fn slice_blosc() {
+        let mut rand = StdRng::seed_from_u64(0x548631dfed77f37a);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let storage = rand_storage(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+            let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+            let orig_strides = default_strides(&shape, dtype.itemsize);
+
+            for _ in 0..10 {
+                let slice = shape
+                    .iter()
+                    .map(|&s| {
+                        let begin = rand.random_range(0..=s);
+                        let end = rand.random_range(begin..=s);
+                        begin..end
+                    })
+                    .collect::<Vec<_>>();
+                let slice_params = loop {
+                    let (_shape, _dtype, slice_params) = rand_params(&mut rand);
+                    if slice_params.shape_required().unwrap().as_slice().len() == slice.len() {
+                        break slice_params;
+                    }
+                };
+                let slice_ndarray = array.slice_blosc(&slice, &slice_params).unwrap();
+
+                let slice_shape = slice_ndarray
+                    .shape()
+                    .iter()
+                    .map(|s| *s as usize)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    slice.iter().map(|r| r.len()).collect::<Vec<_>>(),
+                    slice_shape
+                );
+                assert_eq!(slice_ndarray.typesize(), dtype.itemsize);
+                let slice_strides = default_strides(&slice_shape, dtype.itemsize);
+                let slice_data_buf = slice_ndarray.to_items().unwrap();
+
+                let mut iter = ArrayIter::new(&slice_shape, &slice_strides);
+                while let Some((index, _)) = iter.next() {
+                    let orig_index = index
+                        .iter()
+                        .zip(slice.iter())
+                        .map(|(&i, r)| i + r.start)
+                        .collect::<Vec<_>>();
+                    let orig_offset = index2offset(&orig_index, &orig_strides) as usize;
+                    let slice_offset = index2offset(&index, &slice_strides) as usize;
+                    assert_eq!(data[orig_offset], slice_data_buf[slice_offset]);
+                }
+            }
+        }
+    }
+
+    fn rand_params(rand: &mut impl Rng) -> (Vec<usize>, Dtype, NdarrayParams) {
+        let dtype = rand_dtype(rand);
+        let (shape, params) = rand_params_with_dtype(&dtype, rand);
+        (shape, dtype, params)
+    }
+
+    fn rand_params_with_dtype(dtype: &Dtype, rand: &mut impl Rng) -> (Vec<usize>, NdarrayParams) {
+        let shape = loop {
+            let shape = rand_shape(rand);
+            if dtype.itemsize * shape.iter().product::<usize>() < 1 << 28 {
+                break shape;
+            }
+        };
+
+        let (chunkshape, blockshape) = rand_chunk_block_shapes(&shape, rand);
+        let mut params = NdarrayParams::default();
+        params
+            .cparams(rand_cparams(rand))
+            .dparams(rand_dparams(rand))
+            .shape(shape.as_slice())
+            .chunkshape(&chunkshape)
+            .blockshape(&blockshape)
+            .dtype(&dtype.to_numpy_str())
+            .unwrap();
+        (shape, params)
+    }
+
+    fn rand_shape(rand: &mut impl Rng) -> Vec<usize> {
+        let ndim = rand_ndim(rand);
+        let max_dim_len = if ndim < 4 { 8 } else { 4 };
+        let mut dim_dist = usize_dist_most_likely_small(1..max_dim_len + 1, rand);
+        (0..ndim).map(|_| dim_dist()).collect::<Vec<_>>()
+    }
+
+    fn rand_ndim(rand: &mut impl Rng) -> usize {
+        usize_dist_most_likely_small(1..MAX_DIM + 1, rand)()
+    }
+
+    fn rand_dtype(rand: &mut impl Rng) -> Dtype {
+        fn rand_dtype_impl(depth: usize, rand: &mut impl Rng) -> Dtype {
+            if rand.random_range(0..=depth) == 0 {
+                let kinds = [
+                    DtypeScalarKind::I8,
+                    DtypeScalarKind::U8,
+                    DtypeScalarKind::I16,
+                    DtypeScalarKind::U16,
+                    DtypeScalarKind::I32,
+                    DtypeScalarKind::U32,
+                    DtypeScalarKind::I64,
+                    DtypeScalarKind::U64,
+                    DtypeScalarKind::F16,
+                    DtypeScalarKind::F32,
+                    DtypeScalarKind::F64,
+                    DtypeScalarKind::ComplexF32,
+                    DtypeScalarKind::ComplexF64,
+                    DtypeScalarKind::Bool,
+                ];
+                let kind = *kinds.choose(rand).unwrap();
+                let mut dtype = scalar_dtype(kind);
+                if rand.random_range(0..=depth) == 0 {
+                    let shape_len = usize_dist_most_likely_small(1..4, rand)();
+                    let shape = (0..shape_len)
+                        .map(|_| usize_dist_most_likely_small(1..4, rand)())
+                        .collect::<Vec<_>>();
+                    dtype.itemsize *= shape.iter().product::<usize>();
+                    dtype.shape = shape;
+                }
+                dtype
+            } else {
+                let fields_count = usize_dist_most_likely_small(1..4, rand)();
+                let aligned = rand.random::<bool>();
+                let mut struct_size = 0;
+                let mut fields = HashMap::new();
+                for i in 0..fields_count {
+                    let name = format!("field_{}", i);
+                    let dtype = rand_dtype_impl(depth - 1, rand);
+                    if aligned {
+                        struct_size = ceil_to_multiple(struct_size, dtype.alignment);
+                    }
+                    let offset = struct_size;
+                    struct_size += dtype.itemsize;
+                    fields.insert(name, DtypeSubfield { offset, dtype });
+                }
+                let alignment = if aligned {
+                    let alignment = fields
+                        .values()
+                        .map(|f| f.dtype.alignment)
+                        .max()
+                        .unwrap_or(1);
+                    struct_size = ceil_to_multiple(struct_size, alignment);
+                    alignment
+                } else {
+                    1
+                };
+                let mut shape = Vec::new();
+                if rand.random_range(0..=depth - 1) == 0 {
+                    let shape_len = usize_dist_most_likely_small(1..4, rand)();
+                    shape = (0..shape_len)
+                        .map(|_| usize_dist_most_likely_small(1..4, rand)())
+                        .collect::<Vec<_>>();
+                    struct_size *= shape.iter().product::<usize>();
+                }
+                Dtype {
+                    kind: DtypeKind::Struct { fields },
+                    shape,
+                    itemsize: struct_size,
+                    alignment,
+                }
+            }
+        }
+        loop {
+            let dtype = rand_dtype_impl(2, rand);
+            if dtype.itemsize <= blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
+                return dtype;
+            }
+        }
+    }
+
+    fn rand_data(dtype: &Dtype, shape: &[usize], rand: &mut impl Rng) -> Vec<u8> {
+        struct GenOp<R> {
+            rand: R,
+        }
+        impl<R: Rng> UnaryOp for GenOp<R> {
+            fn i8(&mut self, ptr: *mut i8, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn i16(&mut self, ptr: *mut i16, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn i32(&mut self, ptr: *mut i32, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn i64(&mut self, ptr: *mut i64, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn u8(&mut self, ptr: *mut u8, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn u16(&mut self, ptr: *mut u16, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn u32(&mut self, ptr: *mut u32, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn u64(&mut self, ptr: *mut u64, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn f16(&mut self, ptr: *mut f16, _idx: &[usize]) {
+                let value;
+                cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                    value = f16::from_f32(self.rand.random());
+                } else {
+                    value = f16::from_bits(self.rand.random());
+                } }
+                unsafe { ptr.write(value) };
+            }
+            fn f32(&mut self, ptr: *mut f32, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn f64(&mut self, ptr: *mut f64, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+            fn complex_f32(&mut self, ptr: *mut Complex<f32>, _idx: &[usize]) {
+                let (re, im) = (self.rand.random(), self.rand.random());
+                unsafe { ptr.write(Complex { re, im }) };
+            }
+            fn complex_f64(&mut self, ptr: *mut Complex<f64>, _idx: &[usize]) {
+                let (re, im) = (self.rand.random(), self.rand.random());
+                unsafe { ptr.write(Complex { re, im }) };
+            }
+            fn bool(&mut self, ptr: *mut bool, _idx: &[usize]) {
+                unsafe { ptr.write(self.rand.random()) };
+            }
+        }
+
+        let mut buf = vec![0; dtype.itemsize * shape.iter().product::<usize>()];
+        unsafe {
+            unary_op(
+                buf.as_mut_ptr().cast(),
+                shape,
+                &default_strides(shape, dtype.itemsize),
+                dtype,
+                &mut GenOp { rand },
+            )
+        };
+        buf
+    }
+
+    trait UnaryOp {
+        fn i8(&mut self, ptr: *mut i8, idx: &[usize]);
+        fn i16(&mut self, ptr: *mut i16, idx: &[usize]);
+        fn i32(&mut self, ptr: *mut i32, idx: &[usize]);
+        fn i64(&mut self, ptr: *mut i64, idx: &[usize]);
+        fn u8(&mut self, ptr: *mut u8, idx: &[usize]);
+        fn u16(&mut self, ptr: *mut u16, idx: &[usize]);
+        fn u32(&mut self, ptr: *mut u32, idx: &[usize]);
+        fn u64(&mut self, ptr: *mut u64, idx: &[usize]);
+        fn f16(&mut self, ptr: *mut f16, idx: &[usize]);
+        fn f32(&mut self, ptr: *mut f32, idx: &[usize]);
+        fn f64(&mut self, ptr: *mut f64, idx: &[usize]);
+        fn complex_f32(&mut self, ptr: *mut Complex<f32>, idx: &[usize]);
+        fn complex_f64(&mut self, ptr: *mut Complex<f64>, idx: &[usize]);
+        fn bool(&mut self, ptr: *mut bool, idx: &[usize]);
+    }
+    unsafe fn unary_op(
+        data_ptr: *mut (),
+        shape: &[usize],
+        strides: &[isize],
+        dtype: &Dtype,
+        op: &mut impl UnaryOp,
+    ) {
+        let scalar_fields = extract_inner_scalar_fields(dtype);
+        for (scalar_kind, field_offset) in scalar_fields {
+            let mut iter = ArrayIter::new(shape, strides);
+
+            macro_rules! handle_scalar_kind {
+                ($method:ident, $type:ty) => {
+                    while let Some((index, offset)) = iter.next() {
+                        let ptr =
+                            unsafe { data_ptr.offset(offset).add(field_offset).cast::<$type>() };
+                        op.$method(ptr, index);
+                    }
+                };
+            }
+
+            match scalar_kind {
+                DtypeScalarKind::I8 => handle_scalar_kind!(i8, i8),
+                DtypeScalarKind::I16 => handle_scalar_kind!(i16, i16),
+                DtypeScalarKind::I32 => handle_scalar_kind!(i32, i32),
+                DtypeScalarKind::I64 => handle_scalar_kind!(i64, i64),
+                DtypeScalarKind::U8 => handle_scalar_kind!(u8, u8),
+                DtypeScalarKind::U16 => handle_scalar_kind!(u16, u16),
+                DtypeScalarKind::U32 => handle_scalar_kind!(u32, u32),
+                DtypeScalarKind::U64 => handle_scalar_kind!(u64, u64),
+                DtypeScalarKind::F16 => handle_scalar_kind!(f16, f16),
+                DtypeScalarKind::F32 => handle_scalar_kind!(f32, f32),
+                DtypeScalarKind::F64 => handle_scalar_kind!(f64, f64),
+                DtypeScalarKind::ComplexF32 => handle_scalar_kind!(complex_f32, Complex<f32>),
+                DtypeScalarKind::ComplexF64 => handle_scalar_kind!(complex_f64, Complex<f64>),
+                DtypeScalarKind::Bool => handle_scalar_kind!(bool, bool),
+            }
+        }
+    }
+
+    trait BinaryOp {
+        fn i8(&mut self, ptr1: *mut i8, ptr2: *mut i8, idx: &[usize]);
+        fn i16(&mut self, ptr1: *mut i16, ptr2: *mut i16, idx: &[usize]);
+        fn i32(&mut self, ptr1: *mut i32, ptr2: *mut i32, idx: &[usize]);
+        fn i64(&mut self, ptr1: *mut i64, ptr2: *mut i64, idx: &[usize]);
+        fn u8(&mut self, ptr1: *mut u8, ptr2: *mut u8, idx: &[usize]);
+        fn u16(&mut self, ptr1: *mut u16, ptr2: *mut u16, idx: &[usize]);
+        fn u32(&mut self, ptr1: *mut u32, ptr2: *mut u32, idx: &[usize]);
+        fn u64(&mut self, ptr1: *mut u64, ptr2: *mut u64, idx: &[usize]);
+        fn f16(&mut self, ptr1: *mut f16, ptr2: *mut f16, idx: &[usize]);
+        fn f32(&mut self, ptr1: *mut f32, ptr2: *mut f32, idx: &[usize]);
+        fn f64(&mut self, ptr1: *mut f64, ptr2: *mut f64, idx: &[usize]);
+        fn complex_f32(&mut self, ptr1: *mut Complex<f32>, ptr2: *mut Complex<f32>, idx: &[usize]);
+        fn complex_f64(&mut self, ptr1: *mut Complex<f64>, ptr2: *mut Complex<f64>, idx: &[usize]);
+        fn bool(&mut self, ptr1: *mut bool, ptr2: *mut bool, idx: &[usize]);
+    }
+    unsafe fn binary_op(
+        data_ptr1: *mut (),
+        data_ptr2: *mut (),
+        shape: &[usize],
+        strides1: &[isize],
+        strides2: &[isize],
+        dtype: &Dtype,
+        op: &mut impl BinaryOp,
+    ) {
+        let scalar_fields = extract_inner_scalar_fields(dtype);
+        for (scalar_kind, field_offset) in scalar_fields {
+            let mut iter1 = ArrayIter::new(shape, strides1);
+            let mut iter2 = ArrayIter::new(shape, strides2);
+
+            macro_rules! handle_scalar_kind {
+                ($method:ident, $type:ty) => {
+                    loop {
+                        match (iter1.next(), iter2.next()) {
+                            (Some((index1, offset1)), Some((index2, offset2))) => {
+                                debug_assert_eq!(index1, index2);
+                                let ptr1 = unsafe {
+                                    data_ptr1.offset(offset1).add(field_offset).cast::<$type>()
+                                };
+                                let ptr2 = unsafe {
+                                    data_ptr2.offset(offset2).add(field_offset).cast::<$type>()
+                                };
+                                op.$method(ptr1, ptr2, index1);
+                            }
+                            (None, None) => break,
+                            _ => unreachable!(),
+                        }
+                    }
+                };
+            }
+
+            match scalar_kind {
+                DtypeScalarKind::I8 => handle_scalar_kind!(i8, i8),
+                DtypeScalarKind::I16 => handle_scalar_kind!(i16, i16),
+                DtypeScalarKind::I32 => handle_scalar_kind!(i32, i32),
+                DtypeScalarKind::I64 => handle_scalar_kind!(i64, i64),
+                DtypeScalarKind::U8 => handle_scalar_kind!(u8, u8),
+                DtypeScalarKind::U16 => handle_scalar_kind!(u16, u16),
+                DtypeScalarKind::U32 => handle_scalar_kind!(u32, u32),
+                DtypeScalarKind::U64 => handle_scalar_kind!(u64, u64),
+                DtypeScalarKind::F16 => handle_scalar_kind!(f16, f16),
+                DtypeScalarKind::F32 => handle_scalar_kind!(f32, f32),
+                DtypeScalarKind::F64 => handle_scalar_kind!(f64, f64),
+                DtypeScalarKind::ComplexF32 => handle_scalar_kind!(complex_f32, Complex<f32>),
+                DtypeScalarKind::ComplexF64 => handle_scalar_kind!(complex_f64, Complex<f64>),
+                DtypeScalarKind::Bool => handle_scalar_kind!(bool, bool),
+            }
+        }
+    }
+
+    fn extract_inner_scalar_fields(dtype: &Dtype) -> Vec<(DtypeScalarKind, usize)> {
+        let mut inner_fields = Vec::new();
+        match &dtype.kind {
+            DtypeKind::Scalar {
+                kind,
+                endianness: _,
+            } => inner_fields.push((*kind, 0)),
+            DtypeKind::Struct { fields } => {
+                for field in fields.values() {
+                    let mut subtype_scalars = extract_inner_scalar_fields(&field.dtype);
+                    for (_, subtype_scalar_offset) in subtype_scalars.iter_mut() {
+                        *subtype_scalar_offset += field.offset;
+                    }
+                    inner_fields.extend(subtype_scalars);
+                }
+            }
+        }
+        if !dtype.shape.is_empty() {
+            let repeated = dtype.shape.iter().product::<usize>();
+            if repeated == 0 {
+                return Vec::new();
+            }
+            assert!(dtype.itemsize % repeated == 0);
+            let base_itemsize = dtype.itemsize / repeated;
+            assert!(inner_fields
+                .iter()
+                .all(|(_kind, offset)| (0..base_itemsize).contains(&offset)));
+            inner_fields = (0..repeated)
+                .flat_map(|r| {
+                    let base_offset = r * base_itemsize;
+                    inner_fields
+                        .iter()
+                        .map(|(kind, offset)| (*kind, base_offset + offset))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+        }
+        inner_fields
+    }
+
+    #[cfg(feature = "ndarray")]
+    fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
+    where
+        T: Dtyped,
+    {
+        let len = shape.iter().product::<usize>();
+        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(len);
+        unsafe { buf.set_len(len) };
+        {
+            let buf_data = unsafe {
+                std::slice::from_raw_parts_mut(
+                    buf.as_mut_ptr().cast::<u8>(),
+                    len * std::mem::size_of::<T>(),
+                )
+            };
+            for (buf_elm, val) in buf_data.iter_mut().zip(rand.random_iter::<u8>()) {
+                *buf_elm = val;
+            }
+        }
+        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
+        ndarray::ArrayD::from_shape_vec(shape, buf).unwrap()
+    }
+
+    fn rand_storage(rand: &mut impl Rng) -> StorageWrapper {
+        let continues = rand.random::<bool>();
+        let path = rand.random::<bool>().then(|| {
+            let dir = tempfile::TempDir::new().unwrap();
+            let path = dir.path().join("test.b");
+            (dir, path)
+        });
+        StorageWrapper { path, continues }
+    }
+    struct StorageWrapper {
+        path: Option<(tempfile::TempDir, PathBuf)>,
+        continues: bool,
+    }
+    impl StorageWrapper {
+        fn params(&self) -> SChunkStorageParams<'_> {
+            SChunkStorageParams {
+                urlpath: self.path.as_ref().map(|(_, p)| p.as_path()),
+                contiguous: self.continues,
+            }
+        }
+    }
+
+    fn rand_chunk_block_shapes(shape: &[usize], rand: &mut impl Rng) -> (Vec<usize>, Vec<usize>) {
+        let log2 = |x: usize| (usize::BITS as usize - x.leading_zeros() as usize) as usize;
+        let chunkshape = shape
+            .iter()
+            .map(|s| 1 << rand.random_range(0..log2(*s)))
+            .collect::<Vec<_>>();
+        let blockshape = chunkshape
+            .iter()
+            .map(|s| 1 << rand.random_range(0..log2(*s)))
+            .collect::<Vec<_>>();
+        (chunkshape, blockshape)
+    }
+
+    fn usize_dist_most_likely_small<'a>(
+        range: std::ops::Range<usize>,
+        rand: &'a mut impl Rng,
+    ) -> impl FnMut() -> usize + 'a {
+        let dist = WeightedIndex::new((0..range.len()).map(|i| range.len() - i)).unwrap();
+        move || range.start + dist.sample(rand)
+    }
+
+    fn array_equal_impl(
+        data1_ptr: *const (),
+        data2_ptr: *const (),
+        dtype: &Dtype,
+        shape: &[usize],
+        strides1: &[isize],
+        strides2: &[isize],
+        equal_nan: bool,
+    ) -> bool {
+        struct ArrayEq {
+            equal_nan: bool,
+            result: bool,
+        }
+        impl BinaryOp for ArrayEq {
+            fn i8(&mut self, ptr1: *mut i8, ptr2: *mut i8, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn i16(&mut self, ptr1: *mut i16, ptr2: *mut i16, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn i32(&mut self, ptr1: *mut i32, ptr2: *mut i32, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn i64(&mut self, ptr1: *mut i64, ptr2: *mut i64, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn u8(&mut self, ptr1: *mut u8, ptr2: *mut u8, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn u16(&mut self, ptr1: *mut u16, ptr2: *mut u16, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn u32(&mut self, ptr1: *mut u32, ptr2: *mut u32, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn u64(&mut self, ptr1: *mut u64, ptr2: *mut u64, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+            }
+            fn f16(&mut self, ptr1: *mut f16, ptr2: *mut f16, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                let eq;
+                cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                    eq = (val1 == val2) || (self.equal_nan && val1.is_nan() && val2.is_nan());
+                } else {
+                    eq = val1.to_bits() == val2.to_bits();
+                } }
+                self.result &= eq;
+            }
+            fn f32(&mut self, ptr1: *mut f32, ptr2: *mut f32, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= (val1 == val2) || (self.equal_nan && val1.is_nan() && val2.is_nan());
+            }
+            fn f64(&mut self, ptr1: *mut f64, ptr2: *mut f64, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= (val1 == val2) || (self.equal_nan && val1.is_nan() && val2.is_nan());
+            }
+            fn complex_f32(
+                &mut self,
+                ptr1: *mut Complex<f32>,
+                ptr2: *mut Complex<f32>,
+                _idx: &[usize],
+            ) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= (val1.re == val2.re)
+                    || (self.equal_nan && val1.re.is_nan() && val2.re.is_nan());
+                self.result &= (val1.im == val2.im)
+                    || (self.equal_nan && val1.im.is_nan() && val2.im.is_nan());
+            }
+            fn complex_f64(
+                &mut self,
+                ptr1: *mut Complex<f64>,
+                ptr2: *mut Complex<f64>,
+                _idx: &[usize],
+            ) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= (val1.re == val2.re)
+                    || (self.equal_nan && val1.re.is_nan() && val2.re.is_nan());
+                self.result &= (val1.im == val2.im)
+                    || (self.equal_nan && val1.im.is_nan() && val2.im.is_nan());
+            }
+            fn bool(&mut self, ptr1: *mut bool, ptr2: *mut bool, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= val1 == val2;
+            }
+        }
+
+        let mut eq = ArrayEq {
+            equal_nan,
+            result: true,
+        };
+        unsafe {
+            binary_op(
+                data1_ptr.cast_mut(),
+                data2_ptr.cast_mut(),
+                shape,
+                strides1,
+                strides2,
+                dtype,
+                &mut eq,
+            )
+        };
+        eq.result
+    }
+
+    struct ArrayIter<'a> {
+        shape: &'a [usize],
+        // strides in bytes
+        strides: &'a [isize],
+        index: Vec<usize>,
+        offset: isize,
+        state: ArrayIterState,
+    }
+    enum ArrayIterState {
+        First,
+        InProgress,
+        Exhausted,
+    }
+    impl<'a> ArrayIter<'a> {
+        fn new(
+            shape: &'a [usize],
+            // strides in bytes
+            strides: &'a [isize],
+        ) -> Self {
+            assert_eq!(shape.len(), strides.len());
+            let state = if shape.iter().any(|&s| s == 0) {
+                ArrayIterState::Exhausted
+            } else {
+                ArrayIterState::First
+            };
+            Self {
+                shape,
+                strides,
+                index: vec![0; shape.len()],
+                offset: 0,
+                state,
+            }
+        }
+
+        fn next(&mut self) -> Option<(&[usize], isize)> {
+            match self.state {
+                ArrayIterState::First => {
+                    self.state = ArrayIterState::InProgress;
+                    return Some((&self.index, self.offset));
+                }
+                ArrayIterState::InProgress => {}
+                ArrayIterState::Exhausted => return None,
+            }
+            for i in (0..self.shape.len()).rev() {
+                let size = self.shape[i];
+                let stride = self.strides[i];
+                let idx = &mut self.index[i];
+
+                *idx += 1;
+                if *idx < size {
+                    self.offset += stride;
+                    return Some((&self.index, self.offset));
+                }
+                *idx = 0;
+                self.offset -= (size as isize - 1) * stride;
+            }
+            self.state = ArrayIterState::Exhausted;
+            None
+        }
+    }
+
+    #[cfg(feature = "ndarray")]
+    mod ndarray_util {
+        use crate::{ndarray::tests::array_equal_impl, Dtype, Dtyped};
+
+        pub(crate) fn ndarray_eq_nan<S1, S2, D1, D2, T>(
+            arr1: &ndarray::ArrayBase<S1, D1>,
+            arr2: &ndarray::ArrayBase<S2, D2>,
+        ) -> bool
+        where
+            S1: ndarray::Data<Elem = T>,
+            S2: ndarray::Data<Elem = T>,
+            D1: ndarray::Dimension,
+            D2: ndarray::Dimension,
+            T: Dtyped,
+        {
+            let arr1 = arr1.view().into_dyn();
+            let arr2 = arr2.view().into_dyn();
+            if arr1.shape() != arr2.shape() {
+                return false;
+            }
+            let dtype = Dtype::try_from(T::dtype_numpy_str()).unwrap();
+            let strides1 = arr1.strides();
+            let strides2 = arr2.strides();
+            array_equal_impl(
+                arr1.as_ptr().cast(),
+                arr2.as_ptr().cast(),
+                &dtype,
+                arr1.shape(),
+                strides1,
+                strides2,
+                true,
+            )
+        }
     }
 }

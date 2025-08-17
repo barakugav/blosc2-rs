@@ -522,6 +522,7 @@ impl Drop for SChunk {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SChunkStorageParams<'a> {
     /// If true, the super chunk will be stored in a contiguous memory block.
     /// Note that contiguous super chunks may be inefficient for update operations.

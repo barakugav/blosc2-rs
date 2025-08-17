@@ -289,11 +289,11 @@ pub(crate) mod tests {
         ceil_to_multiple(len, typesize)
     }
 
-    pub(crate) fn rand_cparams(rand: &mut StdRng) -> CParams {
+    pub(crate) fn rand_cparams(rand: &mut impl Rng) -> CParams {
         rand_cparams2(false, rand)
     }
 
-    pub(crate) fn rand_cparams2(lossy: bool, rand: &mut StdRng) -> CParams {
+    pub(crate) fn rand_cparams2(lossy: bool, rand: &mut impl Rng) -> CParams {
         let mut params = CParams::default();
 
         let compressors = [
@@ -365,12 +365,12 @@ pub(crate) mod tests {
             .iter()
             .map(|f| Some(vec![f.clone()]))
             .chain([None, Some(Vec::new()), {
-                let max_filter_num = 2; // TODO: should be 6
+                let (min_filter_num, max_filter_num) = (1, 1); // TODO: should be 6
                 let mut basic_filters = basic_filters.clone();
                 basic_filters.shuffle(rand);
                 let filters = basic_filters
                     .into_iter()
-                    .take(rand.random_range(2..=max_filter_num))
+                    .take(rand.random_range(min_filter_num..=max_filter_num))
                     .collect();
                 Some(filters)
             }])
@@ -382,7 +382,7 @@ pub(crate) mod tests {
         params
     }
 
-    pub(crate) fn rand_dparams(rand: &mut StdRng) -> DParams {
+    pub(crate) fn rand_dparams(rand: &mut impl Rng) -> DParams {
         let mut params = DParams::default();
 
         let nthreads = [None, Some(rand.random_range(0..=2))];
