@@ -3,43 +3,20 @@ pub use dtype::*;
 
 mod ast;
 
-use std::ffi::{CStr, CString};
+mod params;
+pub use params::*;
+
 use std::mem::MaybeUninit;
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
-use crate::util::path2cstr;
-use crate::{CParams, DParams, Error, SChunkStorageParams};
+use crate::util::{path2cstr, ArrayVec};
+use crate::{Error, SChunkStorageParams};
 
 pub const MAX_DIM: usize = blosc2_sys::B2ND_MAX_DIM as usize;
 type DimVec<T> = ArrayVec<T, MAX_DIM>;
-
-/// Represents a repeated value that can be compressed.
-///
-/// This enum is used as an argument to [`Encoder::compress_repeatval`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum NdarrayInitValue<'a> {
-    /// Repeated zeros.
-    Zeros,
-    /// Repeated NaN values (for types that support NaN, like `f32` and `f64`).
-    Nans,
-    /// Uninitialized values.
-    Uninit,
-    /// A specific value to repeat.
-    ///
-    /// The value must have the same size as the `typesize` used in the compression parameters.
-    RepeatedValue(&'a [u8]),
-}
-enum InitArgs<'a> {
-    Zeros,
-    Nans,
-    Uninit,
-    RepeatedValue(&'a [u8]),
-    CopyFromValuesBuf(&'a [u8]),
-    CopyFromNdarray(&'a Ndarray),
-}
 
 pub struct Ndarray {
     ptr: NonNull<blosc2_sys::b2nd_array_t>,
@@ -48,7 +25,7 @@ pub struct Ndarray {
 impl Ndarray {
     fn new_impl(
         value: &InitArgs,
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
         let mut cparams = params.cparams.clone();
@@ -81,13 +58,13 @@ impl Ndarray {
 
         crate::global::global_init();
 
-        let urlpath = storage_params.urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
         let storage = blosc2_sys::blosc2_storage {
-            contiguous: storage_params.contiguous,
+            contiguous: storage.contiguous,
             urlpath,
             cparams: &mut cparams.0 as *mut blosc2_sys::blosc2_cparams,
             dparams: &mut dparams.0 as *mut blosc2_sys::blosc2_dparams,
@@ -170,7 +147,7 @@ impl Ndarray {
 
     pub fn new_at(
         value: &NdarrayInitValue,
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
         Self::new_impl(
@@ -180,7 +157,7 @@ impl Ndarray {
                 NdarrayInitValue::Uninit => InitArgs::Uninit,
                 NdarrayInitValue::RepeatedValue(v) => InitArgs::RepeatedValue(v),
             },
-            storage_params,
+            storage,
             params,
         )
     }
@@ -212,10 +189,10 @@ impl Ndarray {
 
     pub fn from_items_buf_at(
         items: &[u8],
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
-        Self::new_impl(&InitArgs::CopyFromValuesBuf(items), storage_params, params)
+        Self::new_impl(&InitArgs::CopyFromValuesBuf(items), storage, params)
     }
 
     #[cfg(feature = "ndarray")]
@@ -234,7 +211,7 @@ impl Ndarray {
     #[cfg(feature = "ndarray")]
     pub fn from_ndarray_at<S, T, D>(
         ndarray: &ndarray::ArrayBase<S, D>,
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error>
     where
@@ -261,101 +238,12 @@ impl Ndarray {
         let data = ndarray.as_standard_layout();
         let data = data
             .as_slice()
-            .expect("arr.as_standard_layout() must be contiguous");
+            .expect("arr.as_standard_layout() should be contiguous");
         let data_buf = unsafe {
-            std::slice::from_raw_parts(
-                data.as_ptr().cast::<u8>(),
-                data.len() * std::mem::size_of::<T>(),
-            )
+            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data))
         };
 
-        Self::new_impl(
-            &InitArgs::CopyFromValuesBuf(data_buf),
-            storage_params,
-            &params,
-        )
-    }
-
-    pub fn to_items(&self) -> Result<Vec<u8>, Error> {
-        let buf_len = self.typesize() * self.shape().iter().map(|s| *s as usize).product::<usize>();
-        let mut buf = Vec::<MaybeUninit<u8>>::with_capacity(buf_len);
-        unsafe {
-            buf.set_len(buf_len);
-        }
-        self.to_items_into(&mut buf)?;
-        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(buf) };
-        Ok(buf)
-    }
-    pub fn to_items_into(&self, buf: &mut [MaybeUninit<u8>]) -> Result<(), Error> {
-        unsafe {
-            blosc2_sys::b2nd_to_cbuffer(self.as_ptr(), buf.as_mut_ptr().cast(), buf.len() as i64)
-                .into_result()?;
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "ndarray")]
-    pub fn to_ndarray<T, D>(&self) -> Result<ndarray::Array<T, D>, Error>
-    where
-        T: Dtyped,
-        D: ndarray::Dimension,
-    {
-        self.check_dtype::<T>()?;
-        // Safety: we have checked the dtype
-        unsafe { self.to_ndarray_unchecked() }
-    }
-
-    #[cfg(feature = "ndarray")]
-    pub unsafe fn to_ndarray_unchecked<T, D>(&self) -> Result<ndarray::Array<T, D>, Error>
-    where
-        T: Copy + 'static,
-        D: ndarray::Dimension,
-    {
-        let ndim = self.ndim();
-        if D::NDIM.is_some() && D::NDIM.unwrap() != ndim {
-            crate::trace!(
-                "Dimension mismatch: expected {}, got {}",
-                D::NDIM.unwrap(),
-                self.ndim()
-            );
-            return Err(Error::InvalidParam);
-        }
-
-        assert_eq!(std::mem::size_of::<T>(), self.typesize());
-        let shape = self.shape().iter().map(|s| *s as usize).collect::<Vec<_>>();
-        let buf_len = shape.iter().product::<usize>();
-        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
-        unsafe { buf.set_len(buf_len) };
-
-        self.to_items_into(std::slice::from_raw_parts_mut(
-            buf.as_mut_ptr().cast(),
-            buf_len * std::mem::size_of::<T>(),
-        ))?;
-        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
-
-        let mut res_shape = D::zeros(ndim);
-        for i in 0..ndim {
-            res_shape[i] = shape[i];
-        }
-        Ok(ndarray::Array::from_shape_vec(res_shape, buf).unwrap())
-    }
-
-    pub fn save(&self, urlpath: &Path, append: bool) -> Result<(), Error> {
-        let urlpath = path2cstr(urlpath);
-        if !append {
-            unsafe { blosc2_sys::b2nd_save(self.as_ptr(), urlpath.as_ptr().cast_mut()) }
-        } else {
-            // unsafe {
-            // blosc2_sys::b2nd_save_append(self.as_ptr(), urlpath.as_ptr())
-            // }
-            unimplemented!()
-        }
-        .into_result()?;
-        Ok(())
-    }
-
-    fn as_ptr(&self) -> *mut blosc2_sys::b2nd_array_t {
-        self.ptr.as_ptr()
+        Self::from_items_buf_at(data_buf, storage, &params)
     }
 
     pub unsafe fn from_raw_ptr(ptr: *mut ()) -> Result<Self, Error> {
@@ -371,17 +259,35 @@ impl Ndarray {
 
         Ok(Self { ptr, dtype })
     }
+}
 
-    pub fn into_raw_ptr(self) -> *mut () {
-        let ptr = self.as_ptr().cast();
-        std::mem::forget(self);
-        ptr
-    }
+/// Represents a repeated value that can be compressed.
+///
+/// This enum is used as an argument to [`Encoder::compress_repeatval`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum NdarrayInitValue<'a> {
+    /// Repeated zeros.
+    Zeros,
+    /// Repeated NaN values (for types that support NaN, like `f32` and `f64`).
+    Nans,
+    /// Uninitialized values.
+    Uninit,
+    /// A specific value to repeat.
+    ///
+    /// The value must have the same size as the `typesize` used in the compression parameters.
+    RepeatedValue(&'a [u8]),
+}
 
-    pub fn as_raw_ptr(&self) -> *const () {
-        self.as_ptr().cast()
-    }
+enum InitArgs<'a> {
+    Zeros,
+    Nans,
+    Uninit,
+    RepeatedValue(&'a [u8]),
+    CopyFromValuesBuf(&'a [u8]),
+    CopyFromNdarray(&'a Ndarray),
+}
 
+impl Ndarray {
     fn arr(&self) -> &blosc2_sys::b2nd_array_t {
         unsafe { self.ptr.as_ref() }
     }
@@ -402,16 +308,120 @@ impl Ndarray {
         unsafe { std::ffi::CStr::from_ptr(self.arr().dtype) }
     }
 
-    fn dtype_format(&self) -> i8 {
-        self.arr().dtype_format
-    }
-
     pub fn typesize(&self) -> usize {
-        let schunk = unsafe { &*self.arr().sc };
-        schunk.typesize as usize
+        debug_assert_eq!(
+            self.dtype.itemsize,
+            unsafe { &*self.arr().sc }.typesize as usize
+        );
+        self.dtype.itemsize
     }
 
-    pub fn slice(
+    #[cfg(feature = "ndarray")]
+    pub fn to_ndarray<T, D>(&self) -> Result<ndarray::Array<T, D>, Error>
+    where
+        T: Dtyped,
+        D: ndarray::Dimension,
+    {
+        self.check_dtype::<T>()?;
+        // Safety: we have checked the dtype
+        unsafe { self.to_ndarray_without_dtype_check() }
+    }
+
+    #[cfg(feature = "ndarray")]
+    pub unsafe fn to_ndarray_without_dtype_check<T, D>(&self) -> Result<ndarray::Array<T, D>, Error>
+    where
+        T: Copy + 'static,
+        D: ndarray::Dimension,
+    {
+        self.check_ndarray_ndim::<D>()?;
+
+        assert_eq!(std::mem::size_of::<T>(), self.typesize());
+        let shape = self.shape().iter().map(|s| *s as usize).collect::<Vec<_>>();
+        let buf_len = shape.iter().product::<usize>();
+        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
+        unsafe { buf.set_len(buf_len) };
+
+        self.to_items_into(std::slice::from_raw_parts_mut(
+            buf.as_mut_ptr().cast(),
+            buf_len * std::mem::size_of::<T>(),
+        ))?;
+        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
+
+        let ndim = self.ndim();
+        let mut res_shape = D::zeros(ndim);
+        for i in 0..ndim {
+            res_shape[i] = shape[i];
+        }
+        Ok(ndarray::Array::from_shape_vec(res_shape, buf).unwrap())
+    }
+
+    pub fn to_items(&self) -> Result<Vec<u8>, Error> {
+        let buf_len = self.typesize() * self.shape().iter().map(|s| *s as usize).product::<usize>();
+        let mut buf = Vec::<MaybeUninit<u8>>::with_capacity(buf_len);
+        unsafe {
+            buf.set_len(buf_len);
+        }
+        self.to_items_into(&mut buf)?;
+        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(buf) };
+        Ok(buf)
+    }
+
+    pub fn to_items_into(&self, buf: &mut [MaybeUninit<u8>]) -> Result<(), Error> {
+        unsafe {
+            blosc2_sys::b2nd_to_cbuffer(self.as_ptr(), buf.as_mut_ptr().cast(), buf.len() as i64)
+                .into_result()?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "ndarray")]
+    pub fn slice<T, D>(
+        &self,
+        slice: &[std::ops::Range<usize>],
+    ) -> Result<ndarray::Array<T, D>, Error>
+    where
+        T: Dtyped,
+        D: ndarray::Dimension,
+    {
+        self.check_dtype::<T>()?;
+        // Safety: we have already checked the dtype
+        unsafe { self.slice_without_dtype_check(slice) }
+    }
+
+    #[cfg(feature = "ndarray")]
+    pub unsafe fn slice_without_dtype_check<T, D>(
+        &self,
+        slice: &[std::ops::Range<usize>],
+    ) -> Result<ndarray::Array<T, D>, Error>
+    where
+        T: Copy + 'static,
+        D: ndarray::Dimension,
+    {
+        self.check_ndarray_ndim::<D>()?;
+
+        assert_eq!(std::mem::size_of::<T>(), self.typesize());
+        let buf_len = slice.iter().map(|r| r.len()).product::<usize>();
+        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
+        unsafe { buf.set_len(buf_len) };
+
+        self.slice_buf_into(
+            slice,
+            std::slice::from_raw_parts_mut(
+                buf.as_mut_ptr().cast(),
+                buf_len * std::mem::size_of::<T>(),
+            ),
+        )?;
+        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
+
+        let ndim = self.ndim();
+        let mut res_shape = D::zeros(ndim);
+        for i in 0..ndim {
+            res_shape[i] = slice[i].len();
+        }
+        Ok(ndarray::Array::from_shape_vec(res_shape, buf).unwrap())
+    }
+
+    pub fn slice_blosc(
         &self,
         slice: &[std::ops::Range<usize>],
         params: &NdarrayParams,
@@ -450,8 +460,8 @@ impl Ndarray {
             shape.as_slice(), // ignore shape in params
             chunkshape.as_slice(),
             blockshape.as_slice(),
-            self.dtype_cstr(),   // ignore dtype in params
-            self.dtype_format(), // ignore dtype_format in params
+            self.dtype_cstr(), // ignore dtype in params
+            blosc2_sys::DTYPE_NUMPY_FORMAT as _,
         )?;
 
         let mut sliced = MaybeUninit::<*mut blosc2_sys::b2nd_array_t>::uninit();
@@ -467,45 +477,6 @@ impl Ndarray {
         };
         let sliced = unsafe { sliced.assume_init() };
         unsafe { Self::from_raw_ptr(sliced.cast()) }
-    }
-
-    #[cfg(feature = "ndarray")]
-    pub fn slice_ndarray<T>(
-        &self,
-        slice: &[std::ops::Range<usize>],
-    ) -> Result<ndarray::ArrayD<T>, Error>
-    where
-        T: Dtyped,
-    {
-        self.check_dtype::<T>()?;
-        // Safety: we have already checked the dtype
-        unsafe { self.slice_ndarray_unchecked(slice) }
-    }
-
-    #[cfg(feature = "ndarray")]
-    pub unsafe fn slice_ndarray_unchecked<T>(
-        &self,
-        slice: &[std::ops::Range<usize>],
-    ) -> Result<ndarray::ArrayD<T>, Error>
-    where
-        T: Copy + 'static,
-    {
-        assert_eq!(std::mem::size_of::<T>(), self.typesize());
-        let buf_len = slice.iter().map(|r| r.len()).product::<usize>();
-        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
-        unsafe { buf.set_len(buf_len) };
-
-        self.slice_buf_into(
-            slice,
-            std::slice::from_raw_parts_mut(
-                buf.as_mut_ptr().cast(),
-                buf_len * std::mem::size_of::<T>(),
-            ),
-        )?;
-        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
-
-        let shape = slice.iter().map(|r| r.len()).collect::<Vec<_>>();
-        Ok(ndarray::ArrayD::from_shape_vec(shape, buf).unwrap())
     }
 
     pub fn slice_buf(&self, slice: &[std::ops::Range<usize>]) -> Result<Vec<u8>, Error> {
@@ -568,7 +539,58 @@ impl Ndarray {
         Ok(())
     }
 
-    pub fn set_slice(
+    #[cfg(feature = "ndarray")]
+    pub fn set_slice<S, T, D>(
+        &mut self,
+        slice: &[std::ops::Range<usize>],
+        data: &ndarray::ArrayBase<S, D>,
+    ) -> Result<(), Error>
+    where
+        T: Dtyped,
+        S: ndarray::Data<Elem = T>,
+        D: ndarray::Dimension,
+    {
+        self.check_dtype::<T>()?;
+        // Safety: we have checked the dtype
+        unsafe { self.set_slice_without_dtype_check(slice, data) }
+    }
+
+    #[cfg(feature = "ndarray")]
+    pub unsafe fn set_slice_without_dtype_check<S, T, D>(
+        &mut self,
+        slice: &[std::ops::Range<usize>],
+        data: &ndarray::ArrayBase<S, D>,
+    ) -> Result<(), Error>
+    where
+        T: Copy + 'static,
+        S: ndarray::Data<Elem = T>,
+        D: ndarray::Dimension,
+    {
+        if slice.len() != data.ndim()
+            || slice
+                .iter()
+                .zip(data.shape())
+                .any(|(s, &dim)| s.len() != dim)
+        {
+            crate::trace!(
+                "Shape mismatch: slice indices {:?}, set data {:?}",
+                slice,
+                data.shape()
+            );
+            return Err(Error::InvalidParam);
+        }
+
+        let data = data.as_standard_layout();
+        let data = data
+            .as_slice()
+            .expect("arr.as_standard_layout() should be contiguous");
+        let data_buf = unsafe {
+            std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data))
+        };
+        Self::set_slice_buf(self, slice, data_buf)
+    }
+
+    pub fn set_slice_buf(
         &mut self,
         slice: &[std::ops::Range<usize>],
         items: &[u8],
@@ -577,10 +599,10 @@ impl Ndarray {
         let shape = DimVec::from_slice_fn(slice, |r| r.len());
         // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
         let shape = unsafe { shape.unwrap_unchecked() };
-        self.set_slice_with_shape(slice, items, shape.as_slice())
+        self.set_slice_buf_with_shape(slice, items, shape.as_slice())
     }
 
-    pub fn set_slice_with_shape(
+    pub fn set_slice_buf_with_shape(
         &mut self,
         slice: &[std::ops::Range<usize>],
         items: &[u8],
@@ -632,16 +654,62 @@ impl Ndarray {
         Ok(())
     }
 
+    #[cfg(feature = "ndarray")]
+    fn check_ndarray_ndim<D>(&self) -> Result<(), Error>
+    where
+        D: ndarray::Dimension,
+    {
+        let ndim = self.ndim();
+        if D::NDIM.is_some() && D::NDIM.unwrap() != ndim {
+            crate::trace!(
+                "Dimension mismatch: expected {}, got {}",
+                D::NDIM.unwrap(),
+                self.ndim()
+            );
+            return Err(Error::InvalidParam);
+        }
+        Ok(())
+    }
+
+    fn as_ptr(&self) -> *mut blosc2_sys::b2nd_array_t {
+        self.ptr.as_ptr()
+    }
+
+    pub fn as_raw_ptr(&self) -> *const () {
+        self.as_ptr().cast()
+    }
+
+    pub fn into_raw_ptr(self) -> *mut () {
+        let ptr = self.as_ptr().cast();
+        std::mem::forget(self);
+        ptr
+    }
+}
+
+impl Ndarray {
+    pub fn save(&self, urlpath: &Path, append: bool) -> Result<u64, Error> {
+        let urlpath = path2cstr(urlpath);
+        let offset = if !append {
+            unsafe { blosc2_sys::b2nd_save(self.as_ptr(), urlpath.as_ptr().cast_mut()) }
+                .into_result()?;
+            0
+        } else {
+            unsafe { blosc2_sys::b2nd_save_append(self.as_ptr(), urlpath.as_ptr()) }
+                .into_result()? as u64
+        };
+        Ok(offset)
+    }
+
     pub fn copy(&self, params: &NdarrayParams) -> Result<Self, Error> {
         self.copy_to(SChunkStorageParams::in_memory(), params)
     }
 
     pub fn copy_to(
         &self,
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
-        Self::new_impl(&InitArgs::CopyFromNdarray(self), storage_params, params)
+        Self::new_impl(&InitArgs::CopyFromNdarray(self), storage, params)
     }
 
     fn check_dtype<T>(&self) -> Result<(), Error>
@@ -669,207 +737,6 @@ impl Drop for Ndarray {
         unsafe {
             blosc2_sys::b2nd_free(self.as_ptr());
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct NdarrayParams {
-    cparams: CParams,
-    dparams: DParams,
-    shape: Option<DimVec<i64>>,
-    chunksize: Option<DimVec<i32>>,
-    blockshape: Option<DimVec<i32>>,
-    dtype: Option<(Dtype, CString)>,
-}
-impl Default for NdarrayParams {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl NdarrayParams {
-    pub fn new() -> Self {
-        Self {
-            cparams: CParams::default(),
-            dparams: DParams::default(),
-            shape: None,
-            chunksize: None,
-            blockshape: None,
-            dtype: None,
-        }
-    }
-    pub fn cparams(&mut self, cparams: CParams) -> &mut Self {
-        self.cparams = cparams;
-        self
-    }
-    pub fn dparams(&mut self, dparams: DParams) -> &mut Self {
-        self.dparams = dparams;
-        self
-    }
-    pub fn shape(&mut self, shape: &[i64]) -> Result<&mut Self, Error> {
-        let shape = DimVec::from_slice(shape).ok_or_else(|| {
-            crate::trace!("Too many dimensions: {}", shape.len());
-            Error::InvalidParam
-        })?;
-        self.shape = Some(shape);
-        Ok(self)
-    }
-    fn shape_required(&self) -> Result<&DimVec<i64>, Error> {
-        self.shape.as_ref().ok_or_else(|| {
-            crate::trace!("Shape is required");
-            Error::InvalidParam
-        })
-    }
-    pub fn chunksize(&mut self, chunksize: &[i32]) -> Result<&mut Self, Error> {
-        let chunksize = DimVec::from_slice(chunksize).ok_or_else(|| {
-            crate::trace!("Too many dimensions: {}", chunksize.len());
-            Error::InvalidParam
-        })?;
-        self.chunksize = Some(chunksize);
-        Ok(self)
-    }
-    fn chunksize_required(&self) -> Result<&DimVec<i32>, Error> {
-        self.chunksize.as_ref().ok_or_else(|| {
-            crate::trace!("Chunkshape is required");
-            Error::InvalidParam
-        })
-    }
-    pub fn blockshape(&mut self, blockshape: &[i32]) -> Result<&mut Self, Error> {
-        let blockshape = DimVec::from_slice(blockshape).ok_or_else(|| {
-            crate::trace!("Too many dimensions: {}", blockshape.len());
-            Error::InvalidParam
-        })?;
-        self.blockshape = Some(blockshape);
-        Ok(self)
-    }
-    fn blockshape_required(&self) -> Result<&DimVec<i32>, Error> {
-        self.blockshape.as_ref().ok_or_else(|| {
-            crate::trace!("Blockshape is required");
-            Error::InvalidParam
-        })
-    }
-    pub fn dtype(&mut self, dtype: &str) -> Result<&mut Self, Error> {
-        let dtype_cstr = CString::new(dtype).map_err(|_| Error::InvalidParam)?;
-        let dtype = Dtype::try_from(dtype).map_err(|_| {
-            crate::trace!("Invalid dtype: {}", dtype);
-            Error::InvalidParam
-        })?;
-        self.dtype = Some((dtype, dtype_cstr));
-        Ok(self)
-    }
-    fn dtype_required(&self) -> Result<(&Dtype, &CString), Error> {
-        let dtype = self.dtype.as_ref().ok_or_else(|| {
-            crate::trace!("Dtype is required");
-            Error::InvalidParam
-        })?;
-        Ok((&dtype.0, &dtype.1))
-    }
-}
-
-struct Ctx(NonNull<blosc2_sys::b2nd_context_t>);
-impl Ctx {
-    fn new(
-        storage: &blosc2_sys::blosc2_storage,
-        shape: &[i64],
-        chunkshape: &[i32],
-        blockshape: &[i32],
-        dtype: &CStr,
-        dtype_format: i8,
-    ) -> Result<Self, Error> {
-        let ndim = shape.len();
-        if chunkshape.len() != ndim || blockshape.len() != ndim {
-            crate::trace!(
-                "Chunkshape {} and blockshape {} lengths must match shape dimension: {}",
-                chunkshape.len(),
-                blockshape.len(),
-                ndim
-            );
-            return Err(Error::InvalidParam);
-        }
-
-        let metalayers = [];
-        let ctx = unsafe {
-            blosc2_sys::b2nd_create_ctx(
-                storage as *const _,
-                ndim as i8,
-                shape.as_ptr(),
-                chunkshape.as_ptr(),
-                blockshape.as_ptr(),
-                dtype.as_ptr(),
-                dtype_format,
-                metalayers.as_ptr(),
-                metalayers.len() as i32,
-            )
-        };
-        Ok(Ctx(NonNull::new(ctx.cast()).ok_or(Error::Failure)?))
-    }
-    fn as_ptr(&self) -> *mut blosc2_sys::b2nd_context_t {
-        self.0.as_ptr()
-    }
-}
-impl Drop for Ctx {
-    fn drop(&mut self) {
-        unsafe { blosc2_sys::b2nd_free_ctx(self.0.as_ptr()) };
-    }
-}
-
-struct ArrayVec<T, const N: usize> {
-    data: [MaybeUninit<T>; N],
-    len: usize,
-}
-impl<T, const N: usize> ArrayVec<T, N> {
-    fn new() -> Self {
-        Self {
-            data: unsafe { MaybeUninit::uninit().assume_init() },
-            len: 0,
-        }
-    }
-    fn from_slice(slice: &[T]) -> Option<Self>
-    where
-        T: Copy,
-    {
-        Self::from_slice_fn(slice, |item| *item)
-    }
-    fn from_slice_fn<U>(slice: &[U], f: impl Fn(&U) -> T) -> Option<Self> {
-        if slice.len() > N {
-            return None;
-        }
-        let mut arr = Self::new();
-        for (i, item) in slice.iter().enumerate() {
-            arr.data[i].write(f(item));
-        }
-        arr.len = slice.len();
-        Some(arr)
-    }
-    fn as_slice(&self) -> &[T] {
-        unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const T, self.len) }
-    }
-}
-impl<T, const N: usize> Drop for ArrayVec<T, N> {
-    fn drop(&mut self) {
-        for i in 0..self.len {
-            unsafe {
-                self.data[i].assume_init_drop();
-            }
-        }
-    }
-}
-impl<T, const N: usize> Clone for ArrayVec<T, N>
-where
-    T: Copy,
-{
-    fn clone(&self) -> Self {
-        Self {
-            data: self.data.clone(),
-            len: self.len,
-        }
-    }
-}
-impl<T, const N: usize> std::fmt::Debug for ArrayVec<T, N>
-where
-    T: std::fmt::Debug + Copy,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.as_slice(), f)
     }
 }
 

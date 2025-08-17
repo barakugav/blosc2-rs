@@ -30,25 +30,25 @@ impl SChunk {
     ///
     /// # Arguments
     ///
-    /// * `storage_params` - parameters specifying the storage location and layout of the super chunk.
+    /// * `storage` - parameters specifying the storage location and layout of the super chunk.
     ///   See [`SChunkStorageParams`].
     /// * `cparams` - Compression parameters used to compress new chunks added to the super chunk.
     /// * `dparams` - Decompression parameters used to decompress chunks from the super chunk.
     pub fn new_at(
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         cparams: CParams,
         dparams: DParams,
     ) -> Result<Self, Error> {
         crate::global::global_init();
 
-        let urlpath = storage_params.urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
 
         let mut storage = blosc2_sys::blosc2_storage {
-            contiguous: storage_params.contiguous,
+            contiguous: storage.contiguous,
             urlpath,
             cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
@@ -302,26 +302,26 @@ impl SChunk {
     ///
     /// # Arguments
     ///
-    /// * `storage_params` - parameters specifying the storage location and layout of the super chunk.
+    /// * `storage` - parameters specifying the storage location and layout of the super chunk.
     ///   See [`SChunkStorageParams`].
     /// * `cparams` - Compression parameters used to compress new chunks added to the super chunk.
     /// * `dparams` - Decompression parameters used to decompress chunks from the super chunk.
     pub fn copy_to(
         &self,
-        storage_params: SChunkStorageParams,
+        storage: SChunkStorageParams,
         cparams: CParams,
         dparams: DParams,
     ) -> Result<SChunk, Error> {
         crate::global::global_init();
 
-        let urlpath = storage_params.urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
 
         let mut storage = blosc2_sys::blosc2_storage {
-            contiguous: storage_params.contiguous,
+            contiguous: storage.contiguous,
             urlpath,
             cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),

@@ -163,7 +163,6 @@ impl TryFrom<&str> for Dtype {
             .next()
             .ok_or_else(|| DtypeParseError::msg("Unexpected end of input"))?;
         match first_char {
-            '|' | '<' | '>' | '=' => parse_scalar_dtype(s),
             '[' | '(' | '{' => {
                 let ast = parse_ast(s).map_err(|e| {
                     DtypeParseError::new(DtypeParseErrorKind::AstError {
@@ -173,9 +172,7 @@ impl TryFrom<&str> for Dtype {
                 })?;
                 ast2dtype(ast)
             }
-            unexpected_char => Err(DtypeParseError::msg(format!(
-                "Unknown dtype format '{unexpected_char}'"
-            ))),
+            _ => parse_scalar_dtype(s),
         }
     }
 }
@@ -235,10 +232,7 @@ fn parse_scalar_dtype(s: &str) -> Result<Dtype, DtypeParseError> {
         (_, _) => return Err(DtypeParseError::new(DtypeParseErrorKind::UnsupportedScalar)),
     };
     Ok(Dtype {
-        kind: DtypeKind::Scalar {
-            kind,
-            endianness: endianness,
-        },
+        kind: DtypeKind::Scalar { kind, endianness },
         shape: Vec::new(),
         itemsize: size,
         alignment,
@@ -372,7 +366,7 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
                 .into_iter()
                 .zip(names.iter())
                 .map(|(format, name)| {
-                    ast2dtype(format).context2(|| format!("format for field '{}'", name))
+                    ast2dtype(format).context_with(|| format!("format for field '{}'", name))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
@@ -461,8 +455,8 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
 
             let alignment = if aligned {
                 let alignment = fields
-                    .iter()
-                    .map(|(_, f)| f.dtype.alignment)
+                    .values()
+                    .map(|f| f.dtype.alignment)
                     .max()
                     .unwrap_or(1);
                 itemsize = ceil_to_multiple(itemsize, alignment);
@@ -532,14 +526,14 @@ impl std::fmt::Display for DtypeParseError {
             DtypeParseErrorKind::MissingKey(key) => {
                 write!(f, "Missing required key: {key}")
             }
-            DtypeParseErrorKind::Other(cow) => f.write_str(&cow),
+            DtypeParseErrorKind::Other(cow) => f.write_str(cow),
         }
     }
 }
 
 trait DtypeParseResultExt {
     fn context(self, msg: impl Into<Cow<'static, str>>) -> Self;
-    fn context2(self, msg: impl FnOnce() -> String) -> Self;
+    fn context_with(self, msg: impl FnOnce() -> String) -> Self;
 }
 impl<T> DtypeParseResultExt for Result<T, DtypeParseError> {
     fn context(self, msg: impl Into<Cow<'static, str>>) -> Self {
@@ -548,7 +542,7 @@ impl<T> DtypeParseResultExt for Result<T, DtypeParseError> {
             e
         })
     }
-    fn context2(self, msg: impl FnOnce() -> String) -> Self {
+    fn context_with(self, msg: impl FnOnce() -> String) -> Self {
         self.map_err(|mut e| {
             e.backtrace.insert(0, msg().into());
             e
@@ -663,17 +657,19 @@ impl Dtype {
                 let plain_dtype = scalar_dtype(*kind);
                 if plain_dtype.itemsize != itemsize && shape_size > 0 {
                     crate::trace!(
-                        "Dtype itemsize mismatch: expected itemsize {}, got {}",
+                        "Dtype itemsize mismatch: expected {}, got {} ({:?})",
                         plain_dtype.itemsize,
-                        itemsize
+                        itemsize,
+                        *kind
                     );
                     return Err(std::fmt::Error);
                 }
                 if plain_dtype.alignment != self.alignment {
                     crate::trace!(
-                        "Dtype alignment mismatch: expected alignment {}, got {}",
+                        "Dtype alignment mismatch: expected {}, got {} ({:?})",
                         plain_dtype.alignment,
-                        self.alignment
+                        self.alignment,
+                        *kind
                     );
                     return Err(std::fmt::Error);
                 }
