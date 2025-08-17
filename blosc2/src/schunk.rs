@@ -15,43 +15,40 @@ impl SChunk {
     /// Create a new in-memory super chunk.
     ///
     /// The created super chunk will not be contiguous. See [`Self::new`] for more details.
-    pub fn new_in_memory(cparams: CParams, dparams: DParams) -> Result<Self, Error> {
-        Self::new(false, None, cparams, dparams)
+    pub fn new(cparams: CParams, dparams: DParams) -> Result<Self, Error> {
+        Self::new_at(SChunkStorageParams::in_memory(), cparams, dparams)
     }
 
     /// Create a new on-disk super chunk at the given path.
     ///
     /// The created super chunk will not be contiguous. See [`Self::new`] for more details.
     pub fn new_on_disk(urlpath: &Path, cparams: CParams, dparams: DParams) -> Result<Self, Error> {
-        Self::new(false, Some(urlpath), cparams, dparams)
+        Self::new_at(SChunkStorageParams::on_disk(urlpath), cparams, dparams)
     }
 
     /// Create a new super chunk with the specified parameters.
     ///
     /// # Arguments
     ///
-    /// * `contiguous` - If true, the super chunk will be stored in a contiguous memory block.
-    ///   Note that contiguous super chunks are very inefficient for update operations.
-    /// * `urlpath` - If `Some(path)`, the super chunk will be stored on disk at the specified path.
-    ///   If `None`, the super chunk will be stored in memory.
+    /// * `storage_params` - parameters specifying the storage location and layout of the super chunk.
+    ///   See [`SChunkStorageParams`].
     /// * `cparams` - Compression parameters used to compress new chunks added to the super chunk.
     /// * `dparams` - Decompression parameters used to decompress chunks from the super chunk.
-    pub fn new(
-        contiguous: bool,
-        urlpath: Option<&Path>,
+    pub fn new_at(
+        storage_params: SChunkStorageParams,
         cparams: CParams,
         dparams: DParams,
     ) -> Result<Self, Error> {
         crate::global::global_init();
 
-        let urlpath = urlpath.map(path2cstr);
+        let urlpath = storage_params.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
 
         let mut storage = blosc2_sys::blosc2_storage {
-            contiguous,
+            contiguous: storage_params.contiguous,
             urlpath,
             cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
@@ -297,49 +294,34 @@ impl SChunk {
     /// Copy the super chunk to a new in-memory super chunk.
     ///
     /// The created super chunk will not be contiguous. See [`Self::copy`] for more details.
-    pub fn copy_to_memory(&self, cparams: CParams, dparams: DParams) -> Result<SChunk, Error> {
-        self.copy(false, None, cparams, dparams)
-    }
-
-    /// Copy the super chunk to a new on-disk super chunk at the specified path.
-    ///
-    /// The created super chunk will not be contiguous. See [`Self::copy`] for more details.
-    pub fn copy_to_disk(
-        &self,
-        urlpath: &Path,
-        cparams: CParams,
-        dparams: DParams,
-    ) -> Result<SChunk, Error> {
-        self.copy(false, Some(urlpath), cparams, dparams)
+    pub fn copy(&self, cparams: CParams, dparams: DParams) -> Result<SChunk, Error> {
+        self.copy_to(SChunkStorageParams::in_memory(), cparams, dparams)
     }
 
     /// Copy the super chunk to a new super chunk with the specified parameters.
     ///
     /// # Arguments
     ///
-    /// * `contiguous` - If true, the super chunk will be stored in a contiguous memory block.
-    ///   Note that contiguous super chunks are very inefficient for update operations.
-    /// * `urlpath` - If `Some(path)`, the super chunk will be stored on disk at the specified path.
-    ///   If `None`, the super chunk will be stored in memory.
+    /// * `storage_params` - parameters specifying the storage location and layout of the super chunk.
+    ///   See [`SChunkStorageParams`].
     /// * `cparams` - Compression parameters used to compress new chunks added to the super chunk.
     /// * `dparams` - Decompression parameters used to decompress chunks from the super chunk.
-    pub fn copy(
+    pub fn copy_to(
         &self,
-        contiguous: bool,
-        urlpath: Option<&Path>,
+        storage_params: SChunkStorageParams,
         cparams: CParams,
         dparams: DParams,
     ) -> Result<SChunk, Error> {
         crate::global::global_init();
 
-        let urlpath = urlpath.map(path2cstr);
+        let urlpath = storage_params.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
 
         let mut storage = blosc2_sys::blosc2_storage {
-            contiguous,
+            contiguous: storage_params.contiguous,
             urlpath,
             cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
@@ -540,6 +522,30 @@ impl Drop for SChunk {
     }
 }
 
+pub struct SChunkStorageParams<'a> {
+    /// If true, the super chunk will be stored in a contiguous memory block.
+    /// Note that contiguous super chunks may be inefficient for update operations.
+    pub contiguous: bool,
+    /// If `Some(path)`, the super chunk will be stored on disk at the specified path.
+    /// If `None`, the super chunk will be stored in memory.
+    pub urlpath: Option<&'a Path>,
+}
+impl<'a> SChunkStorageParams<'a> {
+    pub fn in_memory() -> Self {
+        Self {
+            contiguous: false,
+            urlpath: None,
+        }
+    }
+
+    pub fn on_disk(urlpath: &'a Path) -> Self {
+        Self {
+            contiguous: false,
+            urlpath: Some(urlpath),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::File;
@@ -552,7 +558,7 @@ mod tests {
     use crate::chunk::Chunk;
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams, rand_src_len};
     use crate::util::{CowVec, FfiVec};
-    use crate::{CParams, DParams, Encoder, SChunk};
+    use crate::{CParams, DParams, Encoder, SChunk, SChunkStorageParams};
 
     #[test]
     fn round_trip() {
@@ -949,10 +955,30 @@ mod tests {
             let temp_dir = tempfile::TempDir::new().unwrap();
             let urlpath = temp_dir.path().join("schunk-dir2");
             let mut schunk2 = match rand.random_range(0..4) {
-                0 => schunk.copy_to_memory(cparams, dparams).unwrap(),
-                1 => schunk.copy(true, None, cparams, dparams).unwrap(),
-                2 => schunk.copy_to_disk(&urlpath, cparams, dparams).unwrap(),
-                3 => schunk.copy(true, Some(&urlpath), cparams, dparams).unwrap(),
+                0 => schunk.copy(cparams, dparams).unwrap(),
+                1 => schunk
+                    .copy_to(
+                        SChunkStorageParams {
+                            contiguous: true,
+                            urlpath: None,
+                        },
+                        cparams,
+                        dparams,
+                    )
+                    .unwrap(),
+                2 => schunk
+                    .copy_to(SChunkStorageParams::on_disk(&urlpath), cparams, dparams)
+                    .unwrap(),
+                3 => schunk
+                    .copy_to(
+                        SChunkStorageParams {
+                            contiguous: true,
+                            urlpath: Some(&urlpath),
+                        },
+                        cparams,
+                        dparams,
+                    )
+                    .unwrap(),
                 _ => unreachable!(),
             };
             assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
@@ -1056,10 +1082,26 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let urlpath = temp_dir.path().join("schunk-dir");
         let schunk = match rand.random_range(0..4) {
-            0 => SChunk::new_in_memory(cparams, dparams).unwrap(),
-            1 => SChunk::new(true, None, cparams, dparams).unwrap(),
+            0 => SChunk::new(cparams, dparams).unwrap(),
+            1 => SChunk::new_at(
+                SChunkStorageParams {
+                    contiguous: true,
+                    urlpath: None,
+                },
+                cparams,
+                dparams,
+            )
+            .unwrap(),
             2 => SChunk::new_on_disk(&urlpath, cparams, dparams).unwrap(),
-            3 => SChunk::new(true, Some(&urlpath), cparams, dparams).unwrap(),
+            3 => SChunk::new_at(
+                SChunkStorageParams {
+                    contiguous: true,
+                    urlpath: Some(&urlpath),
+                },
+                cparams,
+                dparams,
+            )
+            .unwrap(),
             _ => unreachable!(),
         };
         SChunkWrapper { temp_dir, schunk }
