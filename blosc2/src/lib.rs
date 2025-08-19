@@ -27,7 +27,8 @@
 //!
 //! // Compress the data into a Chunk
 //! let cparams = CParams::default()
-//!     .typesize(i32len.try_into().unwrap())
+//!     .typesize(i32len)
+//!     .unwrap()
 //!     .clevel(5)
 //!     .nthreads(2)
 //!     .clone();
@@ -62,7 +63,8 @@
 //!
 //! let i32len = std::mem::size_of::<i32>();
 //! let cparams = CParams::default()
-//!     .typesize(i32len.try_into().unwrap())
+//!     .typesize(i32len)
+//!     .unwrap()
 //!     .clone();
 //! let mut schunk = SChunk::new(cparams.clone(), DParams::default()).unwrap();
 //!
@@ -81,7 +83,8 @@
 //!
 //! // Append the second data array to the SChunk, as already compressed data
 //! let data2_cparams = CParams::default()
-//!     .typesize(i32len.try_into().unwrap()) // typesize must match the SChunk's CParams
+//!     .typesize(i32len) // typesize must match the SChunk's CParams
+//!     .unwrap()
 //!     .clevel(9)
 //!     .clone();
 //! let data2_chunk = Encoder::new(data2_cparams)

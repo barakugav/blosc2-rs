@@ -209,6 +209,7 @@ impl<T, const N: usize> ArrayVec<T, N> {
             len: 0,
         }
     }
+    #[allow(unused)]
     pub(crate) fn from_slice(slice: &[T]) -> Option<Self>
     where
         T: Copy,
@@ -261,8 +262,6 @@ where
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::num::NonZeroUsize;
-
     use rand::distr::weighted::WeightedIndex;
     use rand::prelude::*;
 
@@ -323,7 +322,7 @@ pub(crate) mod tests {
             Some(rand.random_range(1..=64)),
         ];
         if let Some(typesize) = typesizes.choose(rand).unwrap() {
-            params.typesize(NonZeroUsize::new(*typesize).unwrap());
+            params.typesize(*typesize).unwrap();
         }
 
         let nthreads = [None, Some(rand.random_range(0..=64))];

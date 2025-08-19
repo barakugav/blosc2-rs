@@ -1,5 +1,4 @@
 use std::mem::MaybeUninit;
-use std::num::NonZeroUsize;
 use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
@@ -396,9 +395,17 @@ impl CParams {
     /// Set the typesize of the data to compress (in bytes).
     ///
     /// By default, the typesize is set to 8 bytes.
-    pub fn typesize(&mut self, typesize: NonZeroUsize) -> &mut Self {
-        self.0.typesize = typesize.get() as _;
-        self
+    pub fn typesize(&mut self, typesize: usize) -> Result<&mut Self, Error> {
+        if !(0..=blosc2_sys::BLOSC_MAX_TYPESIZE as usize).contains(&typesize) {
+            crate::trace!(
+                "Itemsize {} is greater than BLOSC_MAX_TYPESIZE {}",
+                typesize,
+                blosc2_sys::BLOSC_MAX_TYPESIZE
+            );
+            return Err(Error::InvalidParam);
+        }
+        self.0.typesize = typesize as _;
+        Ok(self)
     }
     /// Get the typesize currently set in the parameters.
     pub fn get_typesize(&self) -> usize {

@@ -4,6 +4,7 @@ use std::fmt::Write;
 use std::num::ParseIntError;
 
 use crate::ndarray::ast::{parse_ast, Node};
+use crate::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Dtype {
@@ -50,15 +51,102 @@ pub(crate) enum Endianness {
     Big,
 }
 
+/// A trait for types that can be represented by a numpy-like dtype.
+///
+/// blosc's [`Ndarray`](crate::ndarray) stores the dtype as a numpy dtype string, for example `<f4`.
+/// To safely ensure an `Ndarray` can be sliced into [`ArrayD<T>`](ndarray::ArrayD) (for example),
+/// we require `T: Dtyped` and compare the string with blosc's dtype representation.
+/// See https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing for the full definitions
+/// and the [`dtype_numpy_str()`](Dtyped::dtype_numpy_str) function for examples.
+///
+/// # Safety
+///
+/// This trait is very unsafe, and the caller should implement it carefully, matching the type size,
+/// alignment and inner fields to the type. Types implementing this should most likely have `#[repr(C)]`
+/// or `#[repr(C, packed)]`, for aligned and non-aligned fields respectively.
 pub unsafe trait Dtyped: Copy + 'static {
+    /// Returns the numpy dtype string representation of the type.
+    ///
+    /// See https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing for the full
+    /// definitions.
+    ///
+    /// # Examples
+    /// ```rust
+    /// use blosc2::Dtyped;
+    ///
+    /// // An packed point struct, with size 12 and alignment 1
+    /// #[derive(Debug, Clone, Copy, PartialEq)]
+    /// #[repr(C, packed)]
+    /// struct Point {
+    ///     x: i32,
+    ///     y: u32,
+    ///     z: i32,
+    /// }
+    /// unsafe impl Dtyped for Point {
+    ///     fn dtype_numpy_str() -> &'static str {
+    ///         "[('x', '<i4'), ('y', '<u4'), ('z', '<i4')]"
+    ///     }
+    /// }
+    ///
+    /// // An packed person struct, with size 12 and alignment 1
+    /// #[derive(Debug, Clone, Copy, PartialEq)]
+    /// #[repr(C, packed)]
+    /// struct Person {
+    ///     height: i32,
+    ///     weight: i64,
+    /// }
+    /// unsafe impl Dtyped for Person {
+    ///     fn dtype_numpy_str() -> &'static str {
+    ///         "[('height', '<i4'), ('weight', '<i8')]"
+    ///     }
+    /// }
+    ///
+    /// // An aligned person struct, with size 16 and alignment 8
+    /// #[derive(Debug, Clone, Copy, PartialEq)]
+    /// #[repr(C)]
+    /// struct PersonAligned {
+    ///     height: i32,
+    ///     weight: i64,
+    /// }
+    /// unsafe impl Dtyped for PersonAligned {
+    ///     fn dtype_numpy_str() -> &'static str {
+    ///         "{'names':['height','weight'], 'formats':['<i4', '<i8'], 'aligned':True}"
+    ///     }
+    /// }
+    ///
+    /// // An audio sample with two channels and 16 samples, represented as an `f32` 2D array.
+    /// #[derive(Debug, Clone, Copy, PartialEq)]
+    /// #[repr(C)]
+    /// struct AudioSample([[f32; 2]; 16]);
+    /// unsafe impl Dtyped for AudioSample {
+    ///     fn dtype_numpy_str() -> &'static str {
+    ///         "('<f4', (16, 2))"
+    ///     }
+    /// }
+    /// ```
     fn dtype_numpy_str() -> &'static str;
 }
-// trait Dtyped2: Dtyped {
-//     fn dtype() -> Dtype {
-//         Dtype::try_from(Self::dtype_numpy_str()).unwrap()
-//     }
-// }
-// impl<T: Dtyped> Dtyped2 for T {}
+pub(crate) trait Dtyped2: Dtyped {
+    #[allow(unused)]
+    fn dtype() -> Result<Dtype, Error> {
+        Ok(Self::dtype_and_str()?.0)
+    }
+    fn dtype_and_str() -> Result<(Dtype, &'static str), Error> {
+        let str2 = Self::dtype_numpy_str();
+        let dtype = Dtype::try_from(str2).map_err(|e| {
+            crate::trace!(
+                "Invalid dtype string for {}: {}",
+                std::any::type_name::<Self>(),
+                e
+            );
+            Error::Failure
+        })?;
+        assert_eq!(core::mem::size_of::<Self>(), dtype.itemsize);
+        assert_eq!(core::mem::align_of::<Self>(), dtype.alignment);
+        Ok((dtype, str2))
+    }
+}
+impl<T: Dtyped> Dtyped2 for T {}
 
 cfg_if::cfg_if! { if #[cfg(target_endian = "little")] {
     macro_rules! endian_prefix {
@@ -634,6 +722,7 @@ impl Dtype {
         FormatAsNumpy(self).to_string()
     }
 
+    #[allow(unused)]
     fn write_as_numpy_str(
         &self,
         f: &mut std::fmt::Formatter<'_>,
