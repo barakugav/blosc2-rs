@@ -81,12 +81,22 @@ impl Ndarray {
                     .chunkshape
                     .as_ref()
                     .map(|c| c.as_slice())
-                    .unwrap_or_else(|| ndarray.arr().chunkshape.as_slice());
+                    .unwrap_or_else(|| unsafe {
+                        std::slice::from_raw_parts(
+                            ndarray.arr().chunkshape.as_ptr(),
+                            ndarray.ndim(),
+                        )
+                    });
                 blockshape = params
                     .blockshape
                     .as_ref()
                     .map(|b| b.as_slice())
-                    .unwrap_or_else(|| ndarray.arr().blockshape.as_slice());
+                    .unwrap_or_else(|| unsafe {
+                        std::slice::from_raw_parts(
+                            ndarray.arr().blockshape.as_ptr(),
+                            ndarray.ndim(),
+                        )
+                    });
             }
         }
 
@@ -1145,7 +1155,7 @@ mod tests {
     use rand::distr::weighted::WeightedIndex;
     use rand::prelude::*;
 
-    use super::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
+    use super::{Ndarray, NdarrayInitValue, NdarrayParams};
     use crate::ndarray::InitValueInner;
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
     use crate::{
@@ -1154,7 +1164,7 @@ mod tests {
     };
 
     #[cfg(feature = "ndarray")]
-    use super::Dtyped2;
+    use super::{Dtyped, Dtyped2};
 
     #[cfg(feature = "ndarray")]
     #[test]
@@ -1194,52 +1204,6 @@ mod tests {
             );
             let array_data = array.to_items().unwrap();
             assert_eq!(data, array_data);
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[repr(C, packed)]
-    struct Point {
-        x: i32,
-        y: u32,
-        z: i32,
-    }
-    unsafe impl Dtyped for Point {
-        fn dtype_numpy_str() -> &'static str {
-            "[('x', '<i4'), ('y', '<u4'), ('z', '<i4')]"
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[repr(C, packed)]
-    struct Person {
-        height: i32,
-        weight: i64,
-    }
-    unsafe impl Dtyped for Person {
-        fn dtype_numpy_str() -> &'static str {
-            "[('height', '<i4'), ('weight', '<i8')]"
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[repr(C)]
-    struct PersonAligned {
-        height: i32,
-        weight: i64,
-    }
-    unsafe impl Dtyped for PersonAligned {
-        fn dtype_numpy_str() -> &'static str {
-            "{'names':['height','weight'], 'formats':['<i4', '<i8'], 'aligned':True}"
-        }
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    #[repr(C)]
-    struct AudioSample([[f32; 2]; 16]);
-    unsafe impl Dtyped for AudioSample {
-        fn dtype_numpy_str() -> &'static str {
-            "('<f4', (16, 2))"
         }
     }
 
@@ -1307,15 +1271,6 @@ mod tests {
             let array_data = array.to_items().unwrap();
             assert_eq!(data, array_data);
         }
-    }
-
-    macro_rules! assert_arr_eq_nan {
-        ($left:expr, $right:expr $(,)?) => {{
-            assert!(ndarray_util::ndarray_eq_nan($left, $right), )
-        }};
-        ($left:expr, $right:expr, $($arg:tt)*) => {{
-            assert!(ndarray_util::ndarray_eq_nan($left, $right), $($arg)+)
-        }};
     }
 
     #[cfg(feature = "ndarray")]
@@ -1947,31 +1902,6 @@ mod tests {
         inner_fields
     }
 
-    #[cfg(feature = "ndarray")]
-    fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
-    where
-        T: Dtyped,
-    {
-        use std::mem::MaybeUninit;
-
-        let len = shape.iter().product::<usize>();
-        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(len);
-        unsafe { buf.set_len(len) };
-        {
-            let buf_data = unsafe {
-                std::slice::from_raw_parts_mut(
-                    buf.as_mut_ptr().cast::<u8>(),
-                    len * std::mem::size_of::<T>(),
-                )
-            };
-            for (buf_elm, val) in buf_data.iter_mut().zip(rand.random_iter::<u8>()) {
-                *buf_elm = val;
-            }
-        }
-        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
-        ndarray::ArrayD::from_shape_vec(shape, buf).unwrap()
-    }
-
     fn rand_storage(rand: &mut impl Rng) -> StorageWrapper {
         let continues = rand.random::<bool>();
         let path = rand.random::<bool>().then(|| {
@@ -2015,6 +1945,7 @@ mod tests {
         move || range.start + dist.sample(rand)
     }
 
+    #[allow(unused)]
     fn array_equal_impl(
         data1_ptr: *const (),
         data2_ptr: *const (),
@@ -2181,8 +2112,47 @@ mod tests {
     }
 
     #[cfg(feature = "ndarray")]
-    mod ndarray_util {
-        use crate::{ndarray::tests::array_equal_impl, Dtyped, Dtyped2};
+    use vanilla_ndarray::*;
+    #[cfg(feature = "ndarray")]
+    mod vanilla_ndarray {
+        use rand::prelude::*;
+
+        use crate::ndarray::tests::array_equal_impl;
+        use crate::{Dtyped, Dtyped2};
+
+        pub(crate) fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
+        where
+            T: Dtyped,
+        {
+            use std::mem::MaybeUninit;
+
+            let len = shape.iter().product::<usize>();
+            let mut buf = Vec::<MaybeUninit<T>>::with_capacity(len);
+            unsafe { buf.set_len(len) };
+            {
+                let buf_data = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        buf.as_mut_ptr().cast::<u8>(),
+                        len * std::mem::size_of::<T>(),
+                    )
+                };
+                for (buf_elm, val) in buf_data.iter_mut().zip(rand.random_iter::<u8>()) {
+                    *buf_elm = val;
+                }
+            }
+            let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
+            ndarray::ArrayD::from_shape_vec(shape, buf).unwrap()
+        }
+
+        macro_rules! assert_arr_eq_nan {
+            ($left:expr, $right:expr $(,)?) => {{
+                assert!(crate::ndarray::tests::ndarray_eq_nan($left, $right), )
+            }};
+            ($left:expr, $right:expr, $($arg:tt)*) => {{
+                assert!(crate::ndarray::tests::ndarray_eq_nan($left, $right), $($arg)+)
+            }};
+        }
+        pub(crate) use assert_arr_eq_nan;
 
         pub(crate) fn ndarray_eq_nan<S1, S2, D1, D2, T>(
             arr1: &ndarray::ArrayBase<S1, D1>,
@@ -2212,6 +2182,52 @@ mod tests {
                 strides2,
                 true,
             )
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        #[repr(C, packed)]
+        pub(crate) struct Point {
+            x: i32,
+            y: u32,
+            z: i32,
+        }
+        unsafe impl Dtyped for Point {
+            fn dtype_numpy_str() -> &'static str {
+                "[('x', '<i4'), ('y', '<u4'), ('z', '<i4')]"
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        #[repr(C, packed)]
+        pub(crate) struct Person {
+            height: i32,
+            weight: i64,
+        }
+        unsafe impl Dtyped for Person {
+            fn dtype_numpy_str() -> &'static str {
+                "[('height', '<i4'), ('weight', '<i8')]"
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        #[repr(C)]
+        pub(crate) struct PersonAligned {
+            height: i32,
+            weight: i64,
+        }
+        unsafe impl Dtyped for PersonAligned {
+            fn dtype_numpy_str() -> &'static str {
+                "{'names':['height','weight'], 'formats':['<i4', '<i8'], 'aligned':True}"
+            }
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        #[repr(C)]
+        pub(crate) struct AudioSample([[f32; 2]; 16]);
+        unsafe impl Dtyped for AudioSample {
+            fn dtype_numpy_str() -> &'static str {
+                "('<f4', (16, 2))"
+            }
         }
     }
 }
