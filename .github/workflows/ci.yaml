@@ -39,11 +39,17 @@ jobs:
             blosc2
             blosc2-sys
 
-      - name: Build blosc2-sys
+      - name: Build blosc2-sys (with features)
         run: cargo build --all-features
         working-directory: blosc2-sys
-      - name: Build blosc2
+      - name: Build blosc2-sys (without features)
+        run: cargo build --no-default-features
+        working-directory: blosc2-sys
+      - name: Build blosc2 (with features)
         run: cargo build --all-features
+        working-directory: blosc2
+      - name: Build blosc2 (without features)
+        run: cargo build --no-default-features
         working-directory: blosc2
 
       - name: Clippy blosc2-sys
