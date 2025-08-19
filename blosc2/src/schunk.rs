@@ -522,6 +522,7 @@ impl Drop for SChunk {
     }
 }
 
+/// Storage parameters for an [`SChunk`], also used by [`Ndarray`](crate::Ndarray).
 #[derive(Debug, Clone)]
 pub struct SChunkStorageParams<'a> {
     /// If true, the super chunk will be stored in a contiguous memory block.
@@ -532,6 +533,9 @@ pub struct SChunkStorageParams<'a> {
     pub urlpath: Option<&'a Path>,
 }
 impl<'a> SChunkStorageParams<'a> {
+    /// Create storage parameters for an in-memory super chunk.
+    ///
+    /// The storage will not be contiguous.
     pub fn in_memory() -> Self {
         Self {
             contiguous: false,
@@ -539,6 +543,9 @@ impl<'a> SChunkStorageParams<'a> {
         }
     }
 
+    /// Create storage parameters for a super chunk stored on disk.
+    ///
+    /// The storage will not be contiguous.
     pub fn on_disk(urlpath: &'a Path) -> Self {
         Self {
             contiguous: false,
