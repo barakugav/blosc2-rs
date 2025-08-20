@@ -175,7 +175,7 @@ macro_rules! impl_dtyped {
 macro_rules! impl_dtyped_scalar {
     ($ty:ty, $str:literal) => {
         impl_dtyped!($ty, {
-            if const { core::mem::size_of::<$ty>() == 1 } {
+            if core::mem::size_of::<$ty>() == 1 {
                 $str
             } else {
                 endian_prefix!($str)
