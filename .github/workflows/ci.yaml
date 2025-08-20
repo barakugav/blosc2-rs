@@ -38,6 +38,9 @@ jobs:
           cache-workspaces: |
             blosc2
             blosc2-sys
+      - name: Setup blosc2 lock file
+        run: mv Cargo.lock.ci Cargo.lock
+        working-directory: blosc2
 
       - name: Build blosc2-sys (without features)
         run: cargo build --no-default-features
@@ -119,6 +122,9 @@ jobs:
           cache-workspaces: |
             blosc2
             blosc2-sys
+      - name: Setup blosc2 lock file
+        run: mv Cargo.lock.ci Cargo.lock
+        working-directory: blosc2
 
       - name: cargo check blosc2
         run: cargo check --all-features
