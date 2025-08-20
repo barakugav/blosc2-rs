@@ -993,7 +993,7 @@ mod tests {
         }
     }
 
-    fn rand_chunks_data_non_empty(typesize: usize, rand: &mut StdRng) -> Vec<Vec<u8>> {
+    fn rand_chunks_data_non_empty(typesize: usize, rand: &mut impl Rng) -> Vec<Vec<u8>> {
         assert!(typesize > 0);
         for _ in 0..100 {
             let data = rand_chunks_data(typesize, rand);
@@ -1004,7 +1004,7 @@ mod tests {
         panic!()
     }
 
-    fn rand_chunks_data(typesize: usize, rand: &mut StdRng) -> Vec<Vec<u8>> {
+    fn rand_chunks_data(typesize: usize, rand: &mut impl Rng) -> Vec<Vec<u8>> {
         let chunks_num = rand.random_range(0..512);
         let chunk_size = if chunks_num == 0 {
             0
@@ -1025,14 +1025,14 @@ mod tests {
             .collect()
     }
 
-    fn rand_chunk_ownership<'a>(chunk: &'a Chunk, rand: &mut StdRng) -> Chunk<'a> {
+    fn rand_chunk_ownership<'a>(chunk: &'a Chunk, rand: &mut impl Rng) -> Chunk<'a> {
         Chunk {
             buffer: rand_bytes_ownership(&chunk.buffer, rand),
             ..chunk.shallow_clone()
         }
     }
 
-    fn rand_bytes_ownership<'a>(bytes: &'a CowVec<u8>, rand: &mut StdRng) -> CowVec<'a, u8> {
+    fn rand_bytes_ownership<'a>(bytes: &'a CowVec<u8>, rand: &mut impl Rng) -> CowVec<'a, u8> {
         match rand.random_range(0..3) {
             0 => CowVec::Borrowed(bytes.as_slice()),
             1 => CowVec::OwnedRust(bytes.as_slice().to_vec()),
@@ -1086,7 +1086,7 @@ mod tests {
         }
     }
 
-    fn new_schunk(cparams: CParams, dparams: DParams, rand: &mut StdRng) -> SChunkWrapper {
+    fn new_schunk(cparams: CParams, dparams: DParams, rand: &mut impl Rng) -> SChunkWrapper {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let urlpath = temp_dir.path().join("schunk-dir");
         let schunk = match rand.random_range(0..4) {

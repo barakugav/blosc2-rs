@@ -252,12 +252,8 @@ impl TryFrom<&str> for Dtype {
             .ok_or_else(|| DtypeParseError::msg("Unexpected end of input"))?;
         match first_char {
             '[' | '(' | '{' => {
-                let ast = parse_ast(s).map_err(|e| {
-                    DtypeParseError::new(DtypeParseErrorKind::AstError {
-                        msg: e.msg,
-                        pos: s.len() - e.pos_from_end,
-                    })
-                })?;
+                let ast = parse_ast(s)
+                    .map_err(|e| DtypeParseError::new(DtypeParseErrorKind::AstError(e)))?;
                 ast2dtype(ast)
             }
             _ => parse_scalar_dtype(s),
@@ -573,7 +569,7 @@ pub(crate) struct DtypeParseError {
 }
 #[derive(Debug, PartialEq, Eq)]
 enum DtypeParseErrorKind {
-    AstError { msg: &'static str, pos: usize },
+    AstError(crate::ndarray::ast::ParseError), // { msg: &'static str, pos: usize },
     ParseIntError(ParseIntError),
     UnsupportedScalar,
     ExpectedLiteral,
@@ -601,16 +597,14 @@ impl std::fmt::Display for DtypeParseError {
             write!(f, "{}, ", self.backtrace.join(" -> "))?;
         };
         match &self.kind {
-            DtypeParseErrorKind::AstError { msg, pos } => {
-                write!(f, "AST parse error: {msg} at position {pos}")
-            }
+            DtypeParseErrorKind::AstError(err) => std::fmt::Display::fmt(err, f),
             DtypeParseErrorKind::ParseIntError(err) => write!(f, "Parse int error: {err}"),
-            DtypeParseErrorKind::UnsupportedScalar => write!(f, "Unsupported scalar type"),
-            DtypeParseErrorKind::ExpectedLiteral => write!(f, "Expected a literal"),
-            DtypeParseErrorKind::ExpectedString => write!(f, "Expected a string"),
-            DtypeParseErrorKind::ExpectedTuple => write!(f, "Expected a tuple"),
-            DtypeParseErrorKind::ExpectedList => write!(f, "Expected a list"),
-            DtypeParseErrorKind::DuplicateKey => write!(f, "Duplicate key found"),
+            DtypeParseErrorKind::UnsupportedScalar => f.write_str("Unsupported scalar type"),
+            DtypeParseErrorKind::ExpectedLiteral => f.write_str("Expected a literal"),
+            DtypeParseErrorKind::ExpectedString => f.write_str("Expected a string"),
+            DtypeParseErrorKind::ExpectedTuple => f.write_str("Expected a tuple"),
+            DtypeParseErrorKind::ExpectedList => f.write_str("Expected a list"),
+            DtypeParseErrorKind::DuplicateKey => f.write_str("Duplicate key found"),
             DtypeParseErrorKind::MissingKey(key) => {
                 write!(f, "Missing required key: {key}")
             }
@@ -779,9 +773,9 @@ impl Dtype {
                     DtypeScalarKind::Bool => "b1",
                 };
                 let endianness_prefix = match (itemsize, endianness) {
-                    (1, _) => "|",
-                    (_, Endianness::Little) => "<",
-                    (_, Endianness::Big) => ">",
+                    (1, _) => '|',
+                    (_, Endianness::Little) => '<',
+                    (_, Endianness::Big) => '>',
                 };
                 if nested {
                     f.write_char('\'')?;
@@ -801,10 +795,16 @@ impl Dtype {
                 if aligned {
                     // make sure offsets are as expected with aligned=True
                     let mut expected_offset = 0;
-                    for (_f_name, field) in &fields {
+                    for (f_name, field) in &fields {
                         expected_offset = ceil_to_multiple(expected_offset, field.dtype.alignment);
                         if field.offset != expected_offset {
-                            panic!();
+                            crate::trace!(
+                                "Unexpected dtype field offset for field '{}': expected {}, got {}",
+                                f_name,
+                                expected_offset,
+                                field.offset
+                            );
+                            return Err(std::fmt::Error);
                         }
                         expected_offset += field.dtype.itemsize;
                     }

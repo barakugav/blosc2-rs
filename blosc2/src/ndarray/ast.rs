@@ -6,13 +6,27 @@ pub(crate) enum Node {
     Dict(Vec<(Node, Node)>),
 }
 
-pub(crate) struct ParseError {
-    pub msg: &'static str,
-    pub pos_from_end: usize,
+pub(crate) fn parse_ast(s: &str) -> Result<Node, ParseError> {
+    parse_ast_impl(&mut Chars(s.chars())).map_err(|e| ParseError {
+        msg: e.msg,
+        pos: s.len() - e.pos_from_end,
+    })
 }
 
-pub(crate) fn parse_ast(s: &str) -> Result<Node, ParseError> {
-    parse_ast_impl(&mut Chars(s.chars()))
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ParseError {
+    pub msg: &'static str,
+    pub pos: usize,
+}
+impl std::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AST parse error at position {}: {}", self.pos, self.msg)
+    }
+}
+
+struct ParseErrorInternal {
+    pub msg: &'static str,
+    pub pos_from_end: usize,
 }
 
 struct Chars<'a>(std::str::Chars<'a>);
@@ -32,15 +46,15 @@ impl Chars<'_> {
             }
         }
     }
-    fn err(&self, msg: &'static str) -> ParseError {
-        ParseError {
+    fn err(&self, msg: &'static str) -> ParseErrorInternal {
+        ParseErrorInternal {
             msg,
             pos_from_end: self.0.as_str().len(),
         }
     }
 }
 
-fn parse_ast_impl(s: &mut Chars) -> Result<Node, ParseError> {
+fn parse_ast_impl(s: &mut Chars) -> Result<Node, ParseErrorInternal> {
     let first_char = s.next().ok_or(s.err("Unexpected end of input"))?;
     match first_char {
         '[' | '(' => {

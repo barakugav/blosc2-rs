@@ -7,13 +7,13 @@ use crate::{CParams, DParams, Dtype, Error};
 /// Parameters for an [`Ndarray`](crate::Ndarray).
 ///
 /// The parameters control the dtype and shape of created arrays, along side compression/decompression settings.
-/// These parameters are required to create any ndarray objects, whether a new array is created or a slice or
+/// These parameters are required to create any ndarray object, whether a new array is created or a slice or
 /// a copy is created from an existing array.
-/// See for example [`Ndarray::new`](crate::Ndarray::new) or [`Ndarray::from_ndarray`](crate::Ndarray::from_ndarray).
+/// See for example [`Ndarray::zeros`](crate::Ndarray::zeros) or [`Ndarray::from_ndarray`](crate::Ndarray::from_ndarray).
 ///
 /// Functions that create arrays may require or ignore specific parameters, for example the dtype is ignored when we
-/// slice an existing array, or shape when we copy an array. Each such function document which parameters are required
-/// and which are ignored.
+/// create a blosc ndarray from an existing [`ndarray::ArrayBase`], and some of the compression parameters are optional
+/// when we slice an existing array. Each such function document which parameters are required and which are ignored.
 #[derive(Debug, Clone)]
 pub struct NdarrayParams {
     pub(crate) cparams: CParams,

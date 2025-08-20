@@ -267,7 +267,7 @@ pub(crate) mod tests {
 
     use crate::{CParams, CompressAlgo, DParams, Filter, SplitMode};
 
-    pub(crate) fn rand_src_len(typesize: usize, rand: &mut StdRng) -> usize {
+    pub(crate) fn rand_src_len(typesize: usize, rand: &mut impl Rng) -> usize {
         if typesize == 0 {
             return 0;
         }
