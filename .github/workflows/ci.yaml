@@ -39,26 +39,38 @@ jobs:
             blosc2
             blosc2-sys
 
-      - name: Build blosc2-sys (with features)
-        run: cargo build --all-features
-        working-directory: blosc2-sys
       - name: Build blosc2-sys (without features)
         run: cargo build --no-default-features
         working-directory: blosc2-sys
-      - name: Build blosc2 (with features)
+      - name: Build blosc2-sys (with features)
         run: cargo build --all-features
-        working-directory: blosc2
+        working-directory: blosc2-sys
       - name: Build blosc2 (without features)
         run: cargo build --no-default-features
         working-directory: blosc2
+      - name: Build blosc2 (with features)
+        run: cargo build --all-features
+        working-directory: blosc2
 
-      - name: Clippy blosc2-sys
+      - name: Clippy blosc2-sys (without features)
+        uses: auguwu/clippy-action@1.4.0
+        with:
+          working-directory: blosc2-sys
+          check-args: --no-default-features
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clippy blosc2-sys (with features)
         uses: auguwu/clippy-action@1.4.0
         with:
           working-directory: blosc2-sys
           check-args: --all-features
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Clippy blosc2
+      - name: Clippy blosc2 (without features)
+        uses: auguwu/clippy-action@1.4.0
+        with:
+          working-directory: blosc2
+          check-args: --no-default-features
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Clippy blosc2 (with features)
         uses: auguwu/clippy-action@1.4.0
         with:
           working-directory: blosc2

@@ -262,12 +262,12 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn rand_chunk(size: usize, params: CParams, rand: &mut StdRng) -> Chunk<'static> {
+    pub(crate) fn rand_chunk(size: usize, params: CParams, rand: &mut impl Rng) -> Chunk<'static> {
         let data = rand_chunk_data(size, rand);
         Encoder::new(params).unwrap().compress(&data).unwrap()
     }
 
-    pub(crate) fn rand_chunk_data(size: usize, rand: &mut StdRng) -> Vec<u8> {
+    pub(crate) fn rand_chunk_data(size: usize, rand: &mut impl Rng) -> Vec<u8> {
         rand.random_iter().take(size).collect()
     }
 }

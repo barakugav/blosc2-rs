@@ -81,22 +81,12 @@ impl Ndarray {
                     .chunkshape
                     .as_ref()
                     .map(|c| c.as_slice())
-                    .unwrap_or_else(|| unsafe {
-                        std::slice::from_raw_parts(
-                            ndarray.arr().chunkshape.as_ptr(),
-                            ndarray.ndim(),
-                        )
-                    });
+                    .unwrap_or_else(|| ndarray.chunkshape());
                 blockshape = params
                     .blockshape
                     .as_ref()
                     .map(|b| b.as_slice())
-                    .unwrap_or_else(|| unsafe {
-                        std::slice::from_raw_parts(
-                            ndarray.arr().blockshape.as_ptr(),
-                            ndarray.ndim(),
-                        )
-                    });
+                    .unwrap_or_else(|| ndarray.blockshape());
             }
         }
 
@@ -478,7 +468,7 @@ impl Ndarray {
         let ptr: NonNull<blosc2_sys::b2nd_array_t> =
             NonNull::new(ptr.cast()).ok_or(Error::Failure)?;
 
-        let dtype_cstr = unsafe { std::ffi::CStr::from_ptr((&*ptr.as_ptr()).dtype) };
+        let dtype_cstr = unsafe { std::ffi::CStr::from_ptr((*ptr.as_ptr()).dtype) };
         let dtype = dtype_cstr.to_str().unwrap();
         let dtype = Dtype::try_from(dtype).map_err(|e| {
             crate::trace!("Invalid dtype: '{}', error: {}", dtype, e);
@@ -582,6 +572,16 @@ impl Ndarray {
         self.dtype.itemsize
     }
 
+    /// Get the shape of chunks in the ndarray.
+    pub fn chunkshape(&self) -> &[i32] {
+        unsafe { std::slice::from_raw_parts(self.arr().chunkshape.as_ptr(), self.ndim()) }
+    }
+
+    /// Get the shape of blocks in the ndarary.
+    pub fn blockshape(&self) -> &[i32] {
+        unsafe { std::slice::from_raw_parts(self.arr().blockshape.as_ptr(), self.ndim()) }
+    }
+
     /// Get an [`ndarray::Array`] with the data copied from this ndarray.
     ///
     /// The type `T` must implement the [`Dtyped`] trait, and the function will succeed only if `T` matches the dtype
@@ -609,7 +609,7 @@ impl Ndarray {
         T: Copy + 'static,
         D: ndarray::Dimension,
     {
-        self.check_ndarray_ndim::<D>()?;
+        self.check_dimension_type_for_read::<D>()?;
 
         assert_eq!(std::mem::size_of::<T>(), self.typesize());
         let shape = self.shape().iter().map(|s| *s as usize).collect::<Vec<_>>();
@@ -720,7 +720,7 @@ impl Ndarray {
         T: Copy + 'static,
         D: ndarray::Dimension,
     {
-        self.check_ndarray_ndim::<D>()?;
+        self.check_dimension_type_for_read::<D>()?;
 
         assert_eq!(std::mem::size_of::<T>(), self.typesize());
         let buf_len = slice.iter().map(|r| r.len()).product::<usize>();
@@ -749,8 +749,8 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `slice` - a range per dimension, representing the portion of the array to extract.
-    /// * `params` - the parameters to use for the blosc array. The chunkshape and blockshape are required, while shape and
-    ///   dtype are ignored and are derived from the existing array.
+    /// * `params` - The parameters to use for the new array. The chunkshape and blockshape are optional, overriding
+    ///   the original array's parameters, while the shape and dtype are ignored (taken from the original array).
     ///
     /// # Returns
     ///
@@ -764,18 +764,25 @@ impl Ndarray {
         let shape = DimVec::from_slice_fn(slice, |r| r.len() as i64);
         let start = DimVec::from_slice_fn(slice, |r| r.start as i64);
         let end = DimVec::from_slice_fn(slice, |r| r.end as i64);
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let shape = unsafe { shape.unwrap_unchecked() };
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let start = unsafe { start.unwrap_unchecked() };
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let end = unsafe { end.unwrap_unchecked() };
 
         let mut cparams = params.cparams.clone();
         let mut dparams = params.dparams.clone();
-        let chunkshape = params.chunkshape_required()?;
-        let blockshape = params.blockshape_required()?;
-
+        let chunkshape = params
+            .chunkshape
+            .as_ref()
+            .map(|c| c.as_slice())
+            .unwrap_or_else(|| self.chunkshape());
+        let blockshape = params
+            .blockshape
+            .as_ref()
+            .map(|b| b.as_slice())
+            .unwrap_or_else(|| self.blockshape());
         cparams.typesize(self.dtype.itemsize).inspect_err(|_| {
             crate::trace!("Invalid dtype: {}", self.dtype_cstr().to_str().unwrap());
         })?;
@@ -791,8 +798,8 @@ impl Ndarray {
         let ctx = Ctx::new(
             &storage,
             shape.as_slice(), // ignore shape in params
-            chunkshape.as_slice(),
-            blockshape.as_slice(),
+            chunkshape,
+            blockshape,
             self.dtype_cstr(), // ignore dtype in params
             blosc2_sys::DTYPE_NUMPY_FORMAT as _,
         )?;
@@ -844,7 +851,7 @@ impl Ndarray {
     ) -> Result<(), Error> {
         self.check_slice_arg(slice)?;
         let shape = DimVec::from_slice_fn(slice, |r| r.len());
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let shape = unsafe { shape.unwrap_unchecked() };
         self.slice_buf_into_with_shape(slice, buf, shape.as_slice())
     }
@@ -867,11 +874,11 @@ impl Ndarray {
         let start = DimVec::from_slice_fn(slice, |r| r.start as i64);
         let end = DimVec::from_slice_fn(slice, |r| r.end as i64);
         let buf_shape = DimVec::from_slice_fn(buf_shape, |s| *s as i64);
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let start = unsafe { start.unwrap_unchecked() };
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let end = unsafe { end.unwrap_unchecked() };
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let buf_shape = unsafe { buf_shape.unwrap_unchecked() };
 
         unsafe {
@@ -976,7 +983,7 @@ impl Ndarray {
     ) -> Result<(), Error> {
         self.check_slice_arg(slice)?;
         let shape = DimVec::from_slice_fn(slice, |r| r.len());
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let shape = unsafe { shape.unwrap_unchecked() };
         self.set_slice_buf_with_shape(slice, items, shape.as_slice())
     }
@@ -999,11 +1006,11 @@ impl Ndarray {
         let start = DimVec::from_slice_fn(slice, |r| r.start as i64);
         let end = DimVec::from_slice_fn(slice, |r| r.end as i64);
         let items_shape = DimVec::from_slice_fn(items_shape, |s| *s as i64);
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let start = unsafe { start.unwrap_unchecked() };
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let end = unsafe { end.unwrap_unchecked() };
-        // Safety: slice.len()==self.ndim(), and we know self.ndim()<=MAX_DIM
+        // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
         let items_shape = unsafe { items_shape.unwrap_unchecked() };
 
         unsafe {
@@ -1034,16 +1041,16 @@ impl Ndarray {
     }
 
     #[cfg(feature = "ndarray")]
-    fn check_ndarray_ndim<D>(&self) -> Result<(), Error>
+    fn check_dimension_type_for_read<D>(&self) -> Result<(), Error>
     where
         D: ndarray::Dimension,
     {
         let ndim = self.ndim();
         if D::NDIM.is_some() && D::NDIM.unwrap() != ndim {
             crate::trace!(
-                "Dimension mismatch: expected {}, got {}",
-                D::NDIM.unwrap(),
-                self.ndim()
+                "Dimension mismatch: ndim {}, requested {}",
+                self.ndim(),
+                D::NDIM.unwrap()
             );
             return Err(Error::InvalidParam);
         }
@@ -1095,7 +1102,7 @@ impl Ndarray {
         Ok(offset)
     }
 
-    /// Create a copy of this array.
+    /// Create a copy of this array in memory.
     ///
     /// # Arguments
     ///
@@ -1172,7 +1179,7 @@ mod tests {
         let array1 = ndarray::array!([[1_i32, 2], [3, 4],]);
         let b2nd = Ndarray::from_ndarray(
             &array1,
-            &NdarrayParams::default()
+            NdarrayParams::default()
                 .blockshape(&[1, 1, 1])
                 .chunkshape(&[1, 1, 1]),
         )
@@ -1512,11 +1519,11 @@ mod tests {
                         begin..end
                     })
                     .collect::<Vec<_>>();
-                let slice_params = loop {
-                    let (_shape, _dtype, slice_params) = rand_params(&mut rand);
-                    if slice_params.shape_required().unwrap().as_slice().len() == slice.len() {
-                        break slice_params;
-                    }
+                let mut slice_params = NdarrayParams::default();
+                if rand.random::<bool>() {
+                    let (chunkshape2, blockshape2) = rand_chunk_block_shapes(&shape, &mut rand);
+                    slice_params.chunkshape(&chunkshape2);
+                    slice_params.blockshape(&blockshape2);
                 };
                 let slice_ndarray = array.slice_blosc(&slice, &slice_params).unwrap();
 
@@ -1541,7 +1548,7 @@ mod tests {
                         .map(|(&i, r)| i + r.start)
                         .collect::<Vec<_>>();
                     let orig_offset = index2offset(&orig_index, &orig_strides) as usize;
-                    let slice_offset = index2offset(&index, &slice_strides) as usize;
+                    let slice_offset = index2offset(index, &slice_strides) as usize;
                     assert_eq!(data[orig_offset], slice_data_buf[slice_offset]);
                 }
             }
@@ -1696,11 +1703,10 @@ mod tests {
                 unsafe { ptr.write(self.rand.random()) };
             }
             fn f16(&mut self, ptr: *mut f16, _idx: &[usize]) {
-                let value;
                 cfg_if::cfg_if! { if #[cfg(feature = "half")] {
-                    value = f16::from_f32(self.rand.random());
+                    let value = f16::from_f32(self.rand.random());
                 } else {
-                    value = f16::from_bits(self.rand.random());
+                    let value = f16::from_bits(self.rand.random());
                 } }
                 unsafe { ptr.write(value) };
             }
@@ -1888,7 +1894,7 @@ mod tests {
             let base_itemsize = dtype.itemsize / repeated;
             assert!(inner_fields
                 .iter()
-                .all(|(_kind, offset)| (0..base_itemsize).contains(&offset)));
+                .all(|(_kind, offset)| (0..base_itemsize).contains(offset)));
             inner_fields = (0..repeated)
                 .flat_map(|r| {
                     let base_offset = r * base_itemsize;
@@ -1925,7 +1931,7 @@ mod tests {
     }
 
     fn rand_chunk_block_shapes(shape: &[usize], rand: &mut impl Rng) -> (Vec<usize>, Vec<usize>) {
-        let log2 = |x: usize| (usize::BITS as usize - x.leading_zeros() as usize) as usize;
+        let log2 = |x: usize| (usize::BITS as usize - x.leading_zeros() as usize);
         let chunkshape = shape
             .iter()
             .map(|s| 1 << rand.random_range(0..log2(*s)))
@@ -1937,10 +1943,10 @@ mod tests {
         (chunkshape, blockshape)
     }
 
-    fn usize_dist_most_likely_small<'a>(
+    fn usize_dist_most_likely_small(
         range: std::ops::Range<usize>,
-        rand: &'a mut impl Rng,
-    ) -> impl FnMut() -> usize + 'a {
+        rand: &mut impl Rng,
+    ) -> impl FnMut() -> usize + '_ {
         let dist = WeightedIndex::new((0..range.len()).map(|i| range.len() - i)).unwrap();
         move || range.start + dist.sample(rand)
     }
@@ -1961,36 +1967,36 @@ mod tests {
         }
         impl BinaryOp for ArrayEq {
             fn i8(&mut self, ptr1: *mut i8, ptr2: *mut i8, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn i16(&mut self, ptr1: *mut i16, ptr2: *mut i16, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn i32(&mut self, ptr1: *mut i32, ptr2: *mut i32, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn i64(&mut self, ptr1: *mut i64, ptr2: *mut i64, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn u8(&mut self, ptr1: *mut u8, ptr2: *mut u8, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn u16(&mut self, ptr1: *mut u16, ptr2: *mut u16, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn u32(&mut self, ptr1: *mut u32, ptr2: *mut u32, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn u64(&mut self, ptr1: *mut u64, ptr2: *mut u64, _idx: &[usize]) {
-                self.result &= unsafe { ptr1.read() } == unsafe { ptr2.read() };
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
             }
             fn f16(&mut self, ptr1: *mut f16, ptr2: *mut f16, _idx: &[usize]) {
                 let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
-                let eq;
+
                 cfg_if::cfg_if! { if #[cfg(feature = "half")] {
-                    eq = (val1 == val2) || (self.equal_nan && val1.is_nan() && val2.is_nan());
+                    let eq = (val1 == val2) || (self.equal_nan && val1.is_nan() && val2.is_nan());
                 } else {
-                    eq = val1.to_bits() == val2.to_bits();
+                    let eq = val1.to_bits() == val2.to_bits();
                 } }
                 self.result &= eq;
             }
@@ -2165,21 +2171,16 @@ mod tests {
             D2: ndarray::Dimension,
             T: Dtyped,
         {
-            let arr1 = arr1.view().into_dyn();
-            let arr2 = arr2.view().into_dyn();
             if arr1.shape() != arr2.shape() {
                 return false;
             }
-            let dtype = T::dtype().unwrap();
-            let strides1 = arr1.strides();
-            let strides2 = arr2.strides();
             array_equal_impl(
                 arr1.as_ptr().cast(),
                 arr2.as_ptr().cast(),
-                &dtype,
+                &T::dtype().unwrap(),
                 arr1.shape(),
-                strides1,
-                strides2,
+                arr1.strides(),
+                arr2.strides(),
                 true,
             )
         }
