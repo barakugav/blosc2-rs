@@ -19,17 +19,21 @@ cfg-if = "1.0.0"
 ndarray = { version = "0.16.1", default-features = false, optional = true }
 half = { version = "2.4", default-features = false, optional = true }
 num-complex = { version = "0.4", default-features = false, optional = true }
+# pyo3 = { version = "0.25.1", features = ["auto-initialize"], optional = true }
+pyo3 = { version = "0.25.1", default-features = false, optional = true }
 
 [dev-dependencies]
 rand = "0.9"
 tempfile = "3.13"
 ndarray = { version = "0.16.1", features = ["std"] }
+ctor = "0.5"
 
 [features]
-default = ["ndarray"]
+default = ["ndarray", "pyo3"]
 zlib = ["blosc2-sys/zlib"]
 zstd = ["blosc2-sys/zstd"]
 ndarray = ["dep:ndarray"]
+pyo3 = ["dep:pyo3"]
 half = ["dep:half"]
 num-complex = ["dep:num-complex"]
 
