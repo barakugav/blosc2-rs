@@ -60,14 +60,34 @@ impl SChunk {
 
     /// Open an existing super chunk from the specified path.
     pub fn open(urlpath: &Path) -> Result<Self, Error> {
-        Self::open_with_offset(urlpath, 0)
+        Self::open_with_options(urlpath, &SChunkOpenOptions::default())
     }
 
-    /// Open an existing super chunk from the specified path with an offset.
-    pub fn open_with_offset(urlpath: &Path, offset: usize) -> Result<Self, Error> {
+    /// Open an existing super chunk from the given options.
+    pub fn open_with_options(urlpath: &Path, options: &SChunkOpenOptions) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let urlpath = path2cstr(urlpath);
-        let schunk = unsafe {
-            blosc2_sys::blosc2_schunk_open_offset(urlpath.as_ptr().cast_mut(), offset as _)
+        let schunk = match &options.mmap {
+            None => unsafe {
+                blosc2_sys::blosc2_schunk_open_offset(urlpath.as_ptr(), options.offset as _)
+            },
+            Some(mode) => {
+                let mode = match mode {
+                    MmapMode::Read => blosc2_sys::blosc2_rs_mmap_mode_BLOSC2_RS_MMAP_READ,
+                    MmapMode::ReadWrite => {
+                        blosc2_sys::blosc2_rs_mmap_mode_BLOSC2_RS_MMAP_READ_WRITE
+                    }
+                    MmapMode::Cow => blosc2_sys::blosc2_rs_mmap_mode_BLOSC2_RS_MMAP_COW,
+                };
+                unsafe {
+                    blosc2_sys::blosc2_rs_schunk_open_mmap(
+                        urlpath.as_ptr(),
+                        options.offset as _,
+                        mode,
+                    )
+                }
+            }
         };
         unsafe { Self::from_raw_ptr(schunk.cast()) }
     }
@@ -105,7 +125,11 @@ impl SChunk {
 
     /// Serialize the super chunk to a file.
     ///
+    /// Either a single file or a directory will be created at `urlpath`, depending if the schunk is sparse or
+    /// contiguous. See [`SChunkStorageParams`]
+    ///
     /// # Arguments
+    ///
     /// * `urlpath` - The path to the file where the super chunk will be saved.
     /// * `append` - If true, the super chunk will be appended to the file. If false, the file
     ///   should not exist, otherwise an error will be returned.
@@ -553,6 +577,50 @@ impl<'a> SChunkStorageParams<'a> {
         }
     }
 }
+/// Options for opening a super chunk.
+#[derive(Clone, Default)]
+pub struct SChunkOpenOptions {
+    offset: u64,
+    mmap: Option<MmapMode>,
+}
+impl SChunkOpenOptions {
+    /// Create an options struct with default options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the offset in the file from which to read the super chunk.
+    pub fn offset(&mut self, offset: u64) -> &mut Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Set the memory-mapped mode for the super chunk.
+    ///
+    /// `None` means that no memory mapping will be used.
+    ///
+    /// # Safety
+    ///
+    /// This function is marked unsafe because of the potential for Undefined Behavior (UB)
+    /// using the mapped memory if the underlying file is subsequently modified, in or out of process.
+    /// Applications must consider the risk and take appropriate precautions when using file-backed maps.
+    pub unsafe fn mmap(&mut self, mmap: Option<MmapMode>) -> &mut Self {
+        self.mmap = mmap;
+        self
+    }
+}
+/// Memory-mapped mode for opening a super chunk.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MmapMode {
+    /// Open existing file for reading only.
+    Read,
+    /// Open existing file for reading and writing.
+    ReadWrite,
+    // /// Create or overwrite existing file for reading and writing.
+    // WriteOverride,
+    /// Copy-on-write: assignments affect data in memory, but changes are not saved to disk. The file on disk is read-only.
+    Cow,
+}
 
 #[cfg(test)]
 mod tests {
@@ -566,7 +634,9 @@ mod tests {
     use crate::chunk::Chunk;
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams, rand_src_len};
     use crate::util::{CowVec, FfiVec};
-    use crate::{CParams, DParams, Encoder, SChunk, SChunkStorageParams};
+    use crate::{
+        CParams, DParams, Encoder, MmapMode, SChunk, SChunkOpenOptions, SChunkStorageParams,
+    };
 
     #[test]
     fn round_trip() {
@@ -784,11 +854,21 @@ mod tests {
             });
             schunk.to_file(&urlpath, padding.is_some()).unwrap();
 
-            let mut schunk2 = if let Some(padding) = padding {
-                SChunk::open_with_offset(&urlpath, padding).unwrap()
-            } else {
-                SChunk::open(&urlpath).unwrap()
+            let contiguous = unsafe { schunk.0.as_ref().storage.as_ref().unwrap().contiguous };
+            let offset = padding.unwrap_or(0) as u64;
+            let mmap = (contiguous && rand.random::<bool>()).then(|| {
+                *[MmapMode::Read, MmapMode::ReadWrite, MmapMode::Cow]
+                    .choose(&mut rand)
+                    .unwrap()
+            });
+            let mut schunk2 = match (offset, mmap) {
+                (0, None) => SChunk::open(&urlpath).unwrap(),
+                (_, _) => SChunk::open_with_options(&urlpath, unsafe {
+                    SChunkOpenOptions::new().offset(offset).mmap(mmap)
+                })
+                .unwrap(),
             };
+
             assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
         }
     }
@@ -900,7 +980,7 @@ mod tests {
                         .take(typesize)
                         .collect::<Vec<u8>>();
                     schunk.set_item(idx, &item).unwrap();
-                    items_data[idx] = item.clone();
+                    items_data[idx].clone_from(&item);
 
                     assert_eq!(item, schunk.item(idx).unwrap());
 
@@ -924,7 +1004,7 @@ mod tests {
                     let items_continous = items.iter().flatten().cloned().collect::<Vec<u8>>();
                     schunk.set_items(start..end, &items_continous).unwrap();
                     for (i, item) in items.iter().enumerate() {
-                        items_data[start + i] = item.clone();
+                        items_data[start + i].clone_from(item);
                     }
 
                     #[allow(clippy::needless_range_loop)]

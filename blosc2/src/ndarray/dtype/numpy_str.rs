@@ -569,7 +569,7 @@ mod tests {
         // use super::Dtype::of_scalar as sdtype;
         use DtypeScalarKind as SKind;
 
-        let sdtype = |x| super::Dtype::of_scalar(x);
+        let sdtype = super::Dtype::of_scalar;
 
         let dtypes = [
             ("|i1", sdtype(SKind::I8)),

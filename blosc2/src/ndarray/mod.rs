@@ -10,7 +10,7 @@ use std::ptr::NonNull;
 
 use crate::error::ErrorCode;
 use crate::util::{path2cstr, ArrayVec};
-use crate::{Error, SChunkStorageParams};
+use crate::{Error, SChunk, SChunkOpenOptions, SChunkStorageParams};
 
 /// The maximum number of dimensions for an Ndarray.
 pub const MAX_DIM: usize = blosc2_sys::B2ND_MAX_DIM as usize;
@@ -296,24 +296,22 @@ impl Ndarray {
 
     /// Opens an existing ndarray from disk.
     pub fn open(urlpath: &Path) -> Result<Self, Error> {
-        Self::open_with_offset(urlpath, 0)
+        Self::open_with_options(urlpath, &SChunkOpenOptions::default())
     }
 
-    /// Opens an existing ndarray from disk with a specific offset.
-    pub fn open_with_offset(urlpath: &Path, offset: usize) -> Result<Self, Error> {
+    /// Opens an existing ndarray from disk with a given options.
+    pub fn open_with_options(urlpath: &Path, options: &SChunkOpenOptions) -> Result<Self, Error> {
         crate::global::global_init();
 
-        let urlpath = path2cstr(urlpath);
+        let schunk = SChunk::open_with_options(urlpath, options)?;
+        let schunk = schunk.into_raw_ptr() as *mut blosc2_sys::blosc2_schunk;
+
         let mut array = MaybeUninit::<*mut blosc2_sys::b2nd_array_t>::uninit();
         unsafe {
-            blosc2_sys::b2nd_open_offset(
-                urlpath.as_ptr().cast_mut(),
-                array.as_mut_ptr(),
-                offset as _,
-            )
-            .into_result()?;
+            blosc2_sys::b2nd_from_schunk(schunk, array.as_mut_ptr()).into_result()?;
         };
         let array = unsafe { array.assume_init() };
+
         unsafe { Self::from_raw_ptr(array.cast()) }
     }
 
@@ -1077,6 +1075,9 @@ impl Ndarray {
 impl Ndarray {
     /// Saves the array to the specified file.
     ///
+    /// Either a single file or a directory will be created at `urlpath`, depending if the array is sparse or
+    /// contiguous. See [`SChunkStorageParams`]
+    ///
     /// # Arguments
     ///
     /// * `urlpath` - The path to the file where the array should be saved.
@@ -1148,7 +1149,6 @@ impl Drop for Ndarray {
 
 #[cfg(test)]
 mod tests {
-
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -1158,7 +1158,10 @@ mod tests {
     use super::{Ndarray, NdarrayInitValue, NdarrayParams};
     use crate::ndarray::InitValueInner;
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
-    use crate::{f16, Complex, Dtype, DtypeKind, DtypeScalarKind, SChunkStorageParams, MAX_DIM};
+    use crate::{
+        f16, Complex, Dtype, DtypeKind, DtypeScalarKind, MmapMode, SChunkOpenOptions,
+        SChunkStorageParams, MAX_DIM,
+    };
 
     #[cfg(feature = "ndarray")]
     use super::Dtyped;
@@ -1344,16 +1347,34 @@ mod tests {
                 std::fs::write(&path, vec![0; padding]).unwrap();
                 padding
             });
+            let contiguous = rand.random::<bool>();
             {
-                let array = Ndarray::from_items_buf(&data, &params).unwrap();
+                let array = Ndarray::from_items_buf_at(
+                    &data,
+                    SChunkStorageParams {
+                        contiguous,
+                        urlpath: None,
+                    },
+                    &params,
+                )
+                .unwrap();
                 let written_offset = array.save(&path, padding.is_some()).unwrap();
                 assert_eq!(written_offset, padding.unwrap_or(0) as u64);
             }
 
-            let array = if let Some(padding) = padding {
-                Ndarray::open_with_offset(&path, padding).unwrap()
-            } else {
-                Ndarray::open(&path).unwrap()
+            let offset = padding.unwrap_or(0) as u64;
+            let mmap = (contiguous && rand.random::<bool>()).then(|| {
+                *[MmapMode::Read, MmapMode::ReadWrite, MmapMode::Cow]
+                    .choose(&mut rand)
+                    .unwrap()
+            });
+
+            let array = match (offset, mmap) {
+                (0, None) => Ndarray::open(&path).unwrap(),
+                (_, _) => Ndarray::open_with_options(&path, unsafe {
+                    SChunkOpenOptions::new().offset(offset).mmap(mmap)
+                })
+                .unwrap(),
             };
 
             assert_eq!(
@@ -1869,7 +1890,7 @@ mod tests {
             } => inner_fields.push((*kind, 0)),
             DtypeKind::Struct { fields } => {
                 for (offset, field) in fields.values() {
-                    let mut subtype_scalars = extract_inner_scalar_fields(&field);
+                    let mut subtype_scalars = extract_inner_scalar_fields(field);
                     for (_, subtype_scalar_offset) in subtype_scalars.iter_mut() {
                         *subtype_scalar_offset += offset;
                     }

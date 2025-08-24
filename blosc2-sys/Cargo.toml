@@ -17,6 +17,7 @@ categories = ["compression", "external-ffi-bindings"]
 
 [build-dependencies]
 bindgen = "0.72"
+cc = "1.2"
 cmake = "0.1"
 
 [features]
