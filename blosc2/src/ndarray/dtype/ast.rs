@@ -13,7 +13,7 @@ pub(crate) fn parse_ast(s: &str) -> Result<Node, ParseError> {
     })
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParseError {
     pub msg: &'static str,
     pub pos: usize,
