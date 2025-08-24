@@ -109,22 +109,26 @@ impl NdarrayParams {
     /// https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing
     /// for the full definitions, and the [`dtype_numpy_str()`](crate::Dtyped::dtype_numpy_str) function
     /// for examples.
-    pub fn dtype(&mut self, dtype: &str) -> Result<&mut Self, Error> {
-        let dtype_str = dtype;
-        let dtype_cstr = CString::new(dtype_str).map_err(|_| Error::InvalidParam)?;
-        let dtype = Dtype::try_from(dtype_str).map_err(|e| {
-            crate::trace!("Invalid dtype: '{}', error: {}", dtype, e);
-            Error::InvalidParam
-        })?;
-        if dtype.itemsize > blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
+    //
+    //
+    //
+    //
+    pub fn dtype(&mut self, dtype: Dtype) -> Result<&mut Self, Error> {
+        // let dtype_cstr = CString::new(dtype_str).map_err(|_| Error::InvalidParam)?;
+        // let dtype = Dtype::from_numpy_str(dtype_str).map_err(|e| {
+        //     crate::trace!("Invalid dtype: '{}', error: {}", dtype, e);
+        //     Error::InvalidParam
+        // })?;
+        if dtype.itemsize() > blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
             crate::trace!(
-                "Itemsize {} is greater than BLOSC_MAX_TYPESIZE {}: {}",
-                dtype.itemsize,
+                "Itemsize {} is greater than BLOSC_MAX_TYPESIZE {}: {:?}",
+                dtype.itemsize(),
                 blosc2_sys::BLOSC_MAX_TYPESIZE,
-                dtype_str
+                dtype
             );
             return Err(Error::InvalidParam);
         }
+        let dtype_cstr = CString::new(dtype.to_numpy_str()).unwrap();
         self.dtype = Some((dtype, dtype_cstr));
         Ok(self)
     }

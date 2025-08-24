@@ -1,8 +1,6 @@
 mod dtype;
 pub use dtype::*;
 
-mod ast;
-
 mod params;
 pub use params::*;
 
@@ -90,7 +88,7 @@ impl Ndarray {
             }
         }
 
-        cparams.typesize(dtype.itemsize).inspect_err(|_| {
+        cparams.typesize(dtype.itemsize()).inspect_err(|_| {
             crate::trace!("Invalid dtype: {}", dtype_cstr.to_str().unwrap());
         })?;
 
@@ -131,11 +129,11 @@ impl Ndarray {
                 blosc2_sys::b2nd_uninit(ctx.as_ptr(), array.as_mut_ptr())
             },
             InitArgs::RepeatedValue(value) => {
-                if value.len() != dtype.itemsize {
+                if value.len() != dtype.itemsize() {
                     crate::trace!(
                         "Repeated value length {} does not match dtype itemsize {}",
                         value.len(),
-                        dtype.itemsize
+                        dtype.itemsize()
                     );
                     return Err(Error::InvalidParam);
                 }
@@ -145,13 +143,13 @@ impl Ndarray {
             }
             InitArgs::CopyFromValuesBuf(items) => {
                 let expected_length =
-                    dtype.itemsize * shape.iter().map(|s| *s as usize).product::<usize>();
+                    dtype.itemsize() * shape.iter().map(|s| *s as usize).product::<usize>();
                 if items.len() != expected_length {
                     crate::trace!(
                         "Items buffer length {} does not match expected length {} ({} * {:?})",
                         items.len(),
                         expected_length,
-                        dtype.itemsize,
+                        dtype.itemsize(),
                         shape
                     );
                     return Err(Error::InvalidParam);
@@ -184,14 +182,14 @@ impl Ndarray {
     ///
     /// For example, the following code creates a new ndarray of shape `[100, 20, 4]` filled with 32 bit integer zeros:
     /// ```rust
-    /// use blosc2::{Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
     ///
     /// let arr = Ndarray::zeros(
     ///     NdarrayParams::default()
     ///         .shape(&[100, 20, 4])
     ///         .chunkshape(&[10, 4, 2])
     ///         .blockshape(&[2, 2, 2])
-    ///         .dtype("i4")
+    ///         .dtype(i32::dtype())
     ///         .unwrap(),
     /// );
     /// assert!(arr.is_ok());
@@ -211,7 +209,7 @@ impl Ndarray {
     ///
     /// For example, the following code creates a new ndarray of shape `[64, 32, 32]` filled with 64 bit float ones:
     /// ```rust
-    /// use blosc2::{Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
     ///
     /// let arr = Ndarray::full(
     ///     &1.0_f64.to_ne_bytes(),
@@ -219,7 +217,7 @@ impl Ndarray {
     ///         .shape(&[64, 32, 32])
     ///         .chunkshape(&[8, 4, 16])
     ///         .blockshape(&[4, 4, 1])
-    ///         .dtype("f8")
+    ///         .dtype(f64::dtype())
     ///         .unwrap(),
     /// );
     /// assert!(arr.is_ok());
@@ -238,7 +236,7 @@ impl Ndarray {
     /// For example, the following code creates a new ndarray of shape `[12, 24, 8]` filled with uninitialized
     /// complex f64 values:
     /// ```rust
-    /// use blosc2::{Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
     ///
     /// let arr = Ndarray::new(
     ///     unsafe { &NdarrayInitValue::uninit()},
@@ -246,7 +244,7 @@ impl Ndarray {
     ///         .shape(&[12, 24, 8])
     ///         .chunkshape(&[6, 8, 1])
     ///         .blockshape(&[3, 8, 1])
-    ///         .dtype("c16")
+    ///         .dtype(blosc2::Complex::<f64>::dtype())
     ///         .unwrap(),
     /// );
     /// assert!(arr.is_ok());
@@ -330,7 +328,7 @@ impl Ndarray {
     /// The elements should be laid out in memory according to the standard strides of the shape.
     ///
     /// ```rust
-    /// use blosc2::{Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
     ///
     /// let data = [1_32, 2, 3, 4, 5, 6];
     /// let data_buf = unsafe {
@@ -342,7 +340,7 @@ impl Ndarray {
     ///         .shape(&[2, 3])
     ///         .chunkshape(&[2, 1])
     ///         .blockshape(&[1, 1])
-    ///         .dtype("i4")
+    ///         .dtype(i32::dtype())
     ///         .unwrap(),
     /// );
     /// assert!(arr.is_ok());
@@ -438,8 +436,7 @@ impl Ndarray {
         let shape = unsafe { shape.unwrap_unchecked() };
 
         let mut params = params.clone();
-        let (_dtype, dtype_str) = T::dtype_and_str()?;
-        params.dtype(dtype_str)?;
+        params.dtype(T::dtype())?;
         params.shape(shape.as_slice());
 
         let data = ndarray.as_standard_layout();
@@ -470,7 +467,7 @@ impl Ndarray {
 
         let dtype_cstr = unsafe { std::ffi::CStr::from_ptr((*ptr.as_ptr()).dtype) };
         let dtype = dtype_cstr.to_str().unwrap();
-        let dtype = Dtype::try_from(dtype).map_err(|e| {
+        let dtype = Dtype::from_numpy_str(dtype).map_err(|e| {
             crate::trace!("Invalid dtype: '{}', error: {}", dtype, e);
             Error::InvalidParam
         })?;
@@ -566,10 +563,10 @@ impl Ndarray {
     /// Get the size of each element in bytes.
     pub fn typesize(&self) -> usize {
         debug_assert_eq!(
-            self.dtype.itemsize,
+            self.dtype.itemsize(),
             unsafe { &*self.arr().sc }.typesize as usize
         );
-        self.dtype.itemsize
+        self.dtype.itemsize()
     }
 
     /// Get the shape of chunks in the ndarray.
@@ -783,7 +780,7 @@ impl Ndarray {
             .as_ref()
             .map(|b| b.as_slice())
             .unwrap_or_else(|| self.blockshape());
-        cparams.typesize(self.dtype.itemsize).inspect_err(|_| {
+        cparams.typesize(self.dtype.itemsize()).inspect_err(|_| {
             crate::trace!("Invalid dtype: {}", self.dtype_cstr().to_str().unwrap());
         })?;
 
@@ -1133,13 +1130,9 @@ impl Ndarray {
     where
         T: Dtyped,
     {
-        let (t_dtype, t_dtype_str) = T::dtype_and_str()?;
+        let t_dtype = T::dtype();
         if self.dtype != t_dtype {
-            crate::trace!(
-                "Dtype mismatch: {} != {}",
-                self.dtype.to_numpy_str(),
-                t_dtype_str
-            );
+            crate::trace!("Dtype mismatch: {:?} != {:?}", self.dtype, t_dtype);
             return Err(Error::InvalidParam);
         }
         Ok(())
@@ -1165,13 +1158,10 @@ mod tests {
     use super::{Ndarray, NdarrayInitValue, NdarrayParams};
     use crate::ndarray::InitValueInner;
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
-    use crate::{
-        f16, scalar_dtype, Complex, Dtype, DtypeKind, DtypeScalarKind, DtypeSubfield,
-        SChunkStorageParams, MAX_DIM,
-    };
+    use crate::{f16, Complex, Dtype, DtypeKind, DtypeScalarKind, SChunkStorageParams, MAX_DIM};
 
     #[cfg(feature = "ndarray")]
-    use super::{Dtyped, Dtyped2};
+    use super::Dtyped;
 
     #[cfg(feature = "ndarray")]
     #[test]
@@ -1222,7 +1212,7 @@ mod tests {
             let storage = rand_storage(&mut rand);
             let value = (&mut rand)
                 .random_iter()
-                .take(dtype.itemsize)
+                .take(dtype.itemsize())
                 .collect::<Vec<_>>();
             let value = {
                 let values = [
@@ -1245,13 +1235,13 @@ mod tests {
             let array_data = array.to_items().unwrap();
             assert_eq!(
                 array_data.len(),
-                dtype.itemsize * shape.iter().product::<usize>()
+                dtype.itemsize() * shape.iter().product::<usize>()
             );
             match value.0 {
                 InitValueInner::Zero => assert!(array_data.iter().all(|&b| b == 0)),
                 InitValueInner::Uninit => {}
                 InitValueInner::Value(items) => assert!(array_data
-                    .chunks_exact(dtype.itemsize)
+                    .chunks_exact(dtype.itemsize())
                     .all(|chunk| chunk == items)),
                 InitValueInner::Nan => unreachable!(),
             }
@@ -1288,7 +1278,7 @@ mod tests {
             T: Dtyped + PartialEq + std::fmt::Debug,
         {
             for _ in 0..repeat {
-                let dtype = T::dtype().unwrap();
+                let dtype = T::dtype();
                 let (shape, params) = rand_params_with_dtype(&dtype, rand);
                 let storage = rand_storage(rand);
                 let array_orig = rand_ndarray::<T>(&shape, rand);
@@ -1412,7 +1402,7 @@ mod tests {
             T: Dtyped + PartialEq + std::fmt::Debug,
         {
             for _ in 0..repeat {
-                let dtype = T::dtype().unwrap();
+                let dtype = T::dtype();
                 let (shape, params) = rand_params_with_dtype(&dtype, rand);
                 let storage = rand_storage(rand);
                 let array_orig = rand_ndarray::<T>(&shape, rand);
@@ -1508,7 +1498,7 @@ mod tests {
             let storage = rand_storage(&mut rand);
             let data = rand_data(&dtype, &shape, &mut rand);
             let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
-            let orig_strides = default_strides(&shape, dtype.itemsize);
+            let orig_strides = default_strides(&shape, dtype.itemsize());
 
             for _ in 0..10 {
                 let slice = shape
@@ -1536,8 +1526,8 @@ mod tests {
                     slice.iter().map(|r| r.len()).collect::<Vec<_>>(),
                     slice_shape
                 );
-                assert_eq!(slice_ndarray.typesize(), dtype.itemsize);
-                let slice_strides = default_strides(&slice_shape, dtype.itemsize);
+                assert_eq!(slice_ndarray.typesize(), dtype.itemsize());
+                let slice_strides = default_strides(&slice_shape, dtype.itemsize());
                 let slice_data_buf = slice_ndarray.to_items().unwrap();
 
                 let mut iter = ArrayIter::new(&slice_shape, &slice_strides);
@@ -1564,7 +1554,7 @@ mod tests {
     fn rand_params_with_dtype(dtype: &Dtype, rand: &mut impl Rng) -> (Vec<usize>, NdarrayParams) {
         let shape = loop {
             let shape = rand_shape(rand);
-            if dtype.itemsize * shape.iter().product::<usize>() < 1 << 28 {
+            if dtype.itemsize() * shape.iter().product::<usize>() < 1 << 28 {
                 break shape;
             }
         };
@@ -1577,7 +1567,7 @@ mod tests {
             .shape(shape.as_slice())
             .chunkshape(&chunkshape)
             .blockshape(&blockshape)
-            .dtype(&dtype.to_numpy_str())
+            .dtype(dtype.clone())
             .unwrap();
         (shape, params)
     }
@@ -1613,14 +1603,13 @@ mod tests {
                     DtypeScalarKind::Bool,
                 ];
                 let kind = *kinds.choose(rand).unwrap();
-                let mut dtype = scalar_dtype(kind);
+                let mut dtype = Dtype::of_scalar(kind);
                 if rand.random_range(0..=depth) == 0 {
                     let shape_len = usize_dist_most_likely_small(1..4, rand)();
                     let shape = (0..shape_len)
                         .map(|_| usize_dist_most_likely_small(1..4, rand)())
                         .collect::<Vec<_>>();
-                    dtype.itemsize *= shape.iter().product::<usize>();
-                    dtype.shape = shape;
+                    dtype = dtype.with_shape(shape).unwrap();
                 }
                 dtype
             } else {
@@ -1632,16 +1621,16 @@ mod tests {
                     let name = format!("field_{}", i);
                     let dtype = rand_dtype_impl(depth - 1, rand);
                     if aligned {
-                        struct_size = ceil_to_multiple(struct_size, dtype.alignment);
+                        struct_size = ceil_to_multiple(struct_size, dtype.alignment());
                     }
                     let offset = struct_size;
-                    struct_size += dtype.itemsize;
-                    fields.insert(name, DtypeSubfield { offset, dtype });
+                    struct_size += dtype.itemsize();
+                    fields.insert(name, (offset, dtype));
                 }
                 let alignment = if aligned {
                     let alignment = fields
                         .values()
-                        .map(|f| f.dtype.alignment)
+                        .map(|(_offset, dtype)| dtype.alignment())
                         .max()
                         .unwrap_or(1);
                     struct_size = ceil_to_multiple(struct_size, alignment);
@@ -1657,17 +1646,12 @@ mod tests {
                         .collect::<Vec<_>>();
                     struct_size *= shape.iter().product::<usize>();
                 }
-                Dtype {
-                    kind: DtypeKind::Struct { fields },
-                    shape,
-                    itemsize: struct_size,
-                    alignment,
-                }
+                Dtype::new(DtypeKind::Struct { fields }, shape, struct_size, alignment).unwrap()
             }
         }
         loop {
             let dtype = rand_dtype_impl(2, rand);
-            if dtype.itemsize <= blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
+            if dtype.itemsize() <= blosc2_sys::BLOSC_MAX_TYPESIZE as usize {
                 return dtype;
             }
         }
@@ -1729,12 +1713,12 @@ mod tests {
             }
         }
 
-        let mut buf = vec![0; dtype.itemsize * shape.iter().product::<usize>()];
+        let mut buf = vec![0; dtype.itemsize() * shape.iter().product::<usize>()];
         unsafe {
             unary_op(
                 buf.as_mut_ptr().cast(),
                 shape,
-                &default_strides(shape, dtype.itemsize),
+                &default_strides(shape, dtype.itemsize()),
                 dtype,
                 &mut GenOp { rand },
             )
@@ -1878,28 +1862,28 @@ mod tests {
 
     fn extract_inner_scalar_fields(dtype: &Dtype) -> Vec<(DtypeScalarKind, usize)> {
         let mut inner_fields = Vec::new();
-        match &dtype.kind {
+        match dtype.kind() {
             DtypeKind::Scalar {
                 kind,
                 endianness: _,
             } => inner_fields.push((*kind, 0)),
             DtypeKind::Struct { fields } => {
-                for field in fields.values() {
-                    let mut subtype_scalars = extract_inner_scalar_fields(&field.dtype);
+                for (offset, field) in fields.values() {
+                    let mut subtype_scalars = extract_inner_scalar_fields(&field);
                     for (_, subtype_scalar_offset) in subtype_scalars.iter_mut() {
-                        *subtype_scalar_offset += field.offset;
+                        *subtype_scalar_offset += offset;
                     }
                     inner_fields.extend(subtype_scalars);
                 }
             }
         }
-        if !dtype.shape.is_empty() {
-            let repeated = dtype.shape.iter().product::<usize>();
+        if !dtype.shape().is_empty() {
+            let repeated = dtype.shape().iter().product::<usize>();
             if repeated == 0 {
                 return Vec::new();
             }
-            assert!(dtype.itemsize % repeated == 0);
-            let base_itemsize = dtype.itemsize / repeated;
+            assert_eq!(dtype.itemsize() % repeated, 0);
+            let base_itemsize = dtype.itemsize() / repeated;
             assert!(inner_fields
                 .iter()
                 .all(|(_kind, offset)| (0..base_itemsize).contains(offset)));
@@ -2129,10 +2113,12 @@ mod tests {
     use vanilla_ndarray::*;
     #[cfg(feature = "ndarray")]
     mod vanilla_ndarray {
+        use std::collections::HashMap;
+
         use rand::prelude::*;
 
         use crate::ndarray::tests::array_equal_impl;
-        use crate::{Dtyped, Dtyped2};
+        use crate::{Dtype, DtypeScalarKind, Dtyped};
 
         pub(crate) fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
         where
@@ -2185,7 +2171,7 @@ mod tests {
             array_equal_impl(
                 arr1.as_ptr().cast(),
                 arr2.as_ptr().cast(),
-                &T::dtype().unwrap(),
+                &T::dtype(),
                 arr1.shape(),
                 &arr1
                     .strides()
@@ -2209,8 +2195,13 @@ mod tests {
             z: i32,
         }
         unsafe impl Dtyped for Point {
-            fn dtype_numpy_str() -> &'static str {
-                "[('x', '<i4'), ('y', '<u4'), ('z', '<i4')]"
+            fn dtype() -> Dtype {
+                Dtype::of_struct(HashMap::from([
+                    ("x".into(), (0, Dtype::of_scalar(DtypeScalarKind::I32))),
+                    ("y".into(), (4, Dtype::of_scalar(DtypeScalarKind::U32))),
+                    ("z".into(), (8, Dtype::of_scalar(DtypeScalarKind::I32))),
+                ]))
+                .unwrap()
             }
         }
 
@@ -2221,8 +2212,12 @@ mod tests {
             weight: i64,
         }
         unsafe impl Dtyped for Person {
-            fn dtype_numpy_str() -> &'static str {
-                "[('height', '<i4'), ('weight', '<i8')]"
+            fn dtype() -> Dtype {
+                Dtype::of_struct(HashMap::from([
+                    ("height".into(), (0, Dtype::of_scalar(DtypeScalarKind::I32))),
+                    ("weight".into(), (4, Dtype::of_scalar(DtypeScalarKind::I64))),
+                ]))
+                .unwrap()
             }
         }
 
@@ -2233,8 +2228,12 @@ mod tests {
             weight: i64,
         }
         unsafe impl Dtyped for PersonAligned {
-            fn dtype_numpy_str() -> &'static str {
-                "{'names':['height','weight'], 'formats':['<i4', '<i8'], 'aligned':True}"
+            fn dtype() -> Dtype {
+                Dtype::of_struct(HashMap::from([
+                    ("height".into(), (0, Dtype::of_scalar(DtypeScalarKind::I32))),
+                    ("weight".into(), (8, Dtype::of_scalar(DtypeScalarKind::I64))),
+                ]))
+                .unwrap()
             }
         }
 
@@ -2242,8 +2241,10 @@ mod tests {
         #[repr(C)]
         pub(crate) struct AudioSample([[f32; 2]; 16]);
         unsafe impl Dtyped for AudioSample {
-            fn dtype_numpy_str() -> &'static str {
-                "('<f4', (16, 2))"
+            fn dtype() -> Dtype {
+                Dtype::of_scalar(DtypeScalarKind::F32)
+                    .with_shape(vec![16, 2])
+                    .unwrap()
             }
         }
     }

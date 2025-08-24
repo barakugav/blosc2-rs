@@ -1,263 +1,21 @@
-use std::borrow::Cow;
-use std::collections::HashMap;
-use std::fmt::Write;
-use std::num::ParseIntError;
+use std::{borrow::Cow, collections::HashMap, fmt::Write, num::ParseIntError};
 
-use crate::ndarray::ast::{parse_ast, Node};
-use crate::Error;
+use crate::ndarray::dtype::ast::{parse_ast, Node};
+use crate::ndarray::dtype::ceil_to_multiple;
+use crate::{Dtype, DtypeError, DtypeKind, DtypeScalarKind, Endianness};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Dtype {
-    pub kind: DtypeKind,
-    pub shape: Vec<usize>,
-    pub itemsize: usize,
-    pub alignment: usize,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum DtypeKind {
-    Scalar {
-        kind: DtypeScalarKind,
-        endianness: Endianness,
-    },
-    Struct {
-        fields: HashMap<String, DtypeSubfield>,
-    },
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DtypeSubfield {
-    pub dtype: Dtype,
-    pub offset: usize,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum DtypeScalarKind {
-    I8,
-    I16,
-    I32,
-    I64,
-    U8,
-    U16,
-    U32,
-    U64,
-    F16,
-    F32,
-    F64,
-    ComplexF32,
-    ComplexF64,
-    Bool,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Endianness {
-    Little,
-    Big,
-}
-
-/// A trait for types that can be represented by a numpy-like dtype.
-///
-/// blosc's [`Ndarray`](crate::ndarray) stores the dtype as a numpy dtype string, for example `<f4`.
-/// To safely ensure an `Ndarray` can be sliced into [`ArrayD<T>`](ndarray::ArrayD) (for example),
-/// we require `T: Dtyped` and compare the string with blosc's dtype representation.
-/// See https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing for the full definitions
-/// and the [`dtype_numpy_str()`](Dtyped::dtype_numpy_str) function for examples.
-///
-/// # Safety
-///
-/// This trait is very unsafe, and the caller should implement it carefully, matching the type size,
-/// alignment and inner fields to the type. Types implementing this should most likely have `#[repr(C)]`
-/// or `#[repr(C, packed)]`, for aligned and non-aligned fields respectively.
-pub unsafe trait Dtyped: Copy + 'static {
-    /// Returns the numpy dtype string representation of the type.
-    ///
-    /// See https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing for the full
-    /// definitions.
-    ///
-    /// # Examples
-    /// ```rust
-    /// use blosc2::Dtyped;
-    ///
-    /// // An packed point struct, with size 12 and alignment 1
-    /// #[derive(Debug, Clone, Copy, PartialEq)]
-    /// #[repr(C, packed)]
-    /// struct Point {
-    ///     x: i32,
-    ///     y: u32,
-    ///     z: i32,
-    /// }
-    /// unsafe impl Dtyped for Point {
-    ///     fn dtype_numpy_str() -> &'static str {
-    ///         "[('x', '<i4'), ('y', '<u4'), ('z', '<i4')]"
-    ///     }
-    /// }
-    ///
-    /// // An packed person struct, with size 12 and alignment 1
-    /// #[derive(Debug, Clone, Copy, PartialEq)]
-    /// #[repr(C, packed)]
-    /// struct Person {
-    ///     height: i32,
-    ///     weight: i64,
-    /// }
-    /// unsafe impl Dtyped for Person {
-    ///     fn dtype_numpy_str() -> &'static str {
-    ///         "[('height', '<i4'), ('weight', '<i8')]"
-    ///     }
-    /// }
-    ///
-    /// // An aligned person struct, with size 16 and alignment 8
-    /// #[derive(Debug, Clone, Copy, PartialEq)]
-    /// #[repr(C)]
-    /// struct PersonAligned {
-    ///     height: i32,
-    ///     weight: i64,
-    /// }
-    /// unsafe impl Dtyped for PersonAligned {
-    ///     fn dtype_numpy_str() -> &'static str {
-    ///         "{'names':['height','weight'], 'formats':['<i4', '<i8'], 'aligned':True}"
-    ///     }
-    /// }
-    ///
-    /// // An audio sample with two channels and 16 samples, represented as an `f32` 2D array.
-    /// #[derive(Debug, Clone, Copy, PartialEq)]
-    /// #[repr(C)]
-    /// struct AudioSample([[f32; 2]; 16]);
-    /// unsafe impl Dtyped for AudioSample {
-    ///     fn dtype_numpy_str() -> &'static str {
-    ///         "('<f4', (16, 2))"
-    ///     }
-    /// }
-    /// ```
-    fn dtype_numpy_str() -> &'static str;
-}
-pub(crate) trait Dtyped2: Dtyped {
-    #[allow(unused)]
-    fn dtype() -> Result<Dtype, Error> {
-        Ok(Self::dtype_and_str()?.0)
-    }
-    fn dtype_and_str() -> Result<(Dtype, &'static str), Error> {
-        let str2 = Self::dtype_numpy_str();
-        let dtype = Dtype::try_from(str2).map_err(|e| {
-            crate::trace!(
-                "Invalid dtype string for {}: {}",
-                std::any::type_name::<Self>(),
-                e
-            );
-            Error::Failure
-        })?;
-        assert_eq!(core::mem::size_of::<Self>(), dtype.itemsize);
-        assert_eq!(core::mem::align_of::<Self>(), dtype.alignment);
-        Ok((dtype, str2))
-    }
-}
-impl<T: Dtyped> Dtyped2 for T {}
-
-cfg_if::cfg_if! { if #[cfg(target_endian = "little")] {
-    macro_rules! endian_prefix {
-        ($str:literal) => {
-            concat!("<", $str)
-        };
-    }
-} else {
-    macro_rules! endian_prefix {
-        ($str:literal) => {
-            concat!(">", $str)
-        };
-    }
-} }
-
-macro_rules! impl_dtyped {
-    ($ty:ty, $str:expr) => {
-        unsafe impl Dtyped for $ty {
-            fn dtype_numpy_str() -> &'static str {
-                $str
-            }
+pub(crate) fn parse_numpy_dtype_str(s: &str) -> Result<Dtype, DtypeParseError> {
+    let mut chars = s.chars();
+    let first_char = chars
+        .next()
+        .ok_or_else(|| DtypeParseError::msg("Unexpected end of input"))?;
+    match first_char {
+        '[' | '(' | '{' => {
+            let ast =
+                parse_ast(s).map_err(|e| DtypeParseError::new(DtypeParseErrorKind::AstError(e)))?;
+            ast2dtype(ast)
         }
-    };
-}
-
-macro_rules! impl_dtyped_scalar {
-    ($ty:ty, $str:literal) => {
-        impl_dtyped!($ty, {
-            if core::mem::size_of::<$ty>() == 1 {
-                $str
-            } else {
-                endian_prefix!($str)
-            }
-        });
-    };
-}
-impl_dtyped_scalar!(i8, "i1");
-impl_dtyped_scalar!(i16, "i2");
-impl_dtyped_scalar!(i32, "i4");
-impl_dtyped_scalar!(i64, "i8");
-impl_dtyped_scalar!(u8, "u1");
-impl_dtyped_scalar!(u16, "u2");
-impl_dtyped_scalar!(u32, "u4");
-impl_dtyped_scalar!(u64, "u8");
-impl_dtyped_scalar!(f16, "f2");
-impl_dtyped_scalar!(f32, "f4");
-impl_dtyped_scalar!(f64, "f8");
-impl_dtyped_scalar!(Complex<f32>, "c8");
-impl_dtyped_scalar!(Complex<f64>, "c16");
-impl_dtyped_scalar!(bool, "b1");
-
-cfg_if::cfg_if! { if #[cfg(feature = "half")] {
-    pub use half::f16;
-} else {
-        /// A 16-bit floating point type implementing the IEEE 754-2008 standard [`binary16`] a.k.a "half"
-        /// format.
-        ///
-        /// Doesn't provide any arithmetic operations, but can be converted to/from `u16`.
-        /// Enable the `half` feature to get a fully functional `f16` type.
-        #[derive(Copy, Clone, Debug, Default)]
-        #[repr(transparent)]
-        #[allow(non_camel_case_types)]
-        pub struct f16(u16);
-        impl f16 {
-            #[doc = concat!("Creates a new `f16` from its raw bit representation.")]
-            pub const fn from_bits(bits: u16) -> Self {
-                Self(bits)
-            }
-            #[doc = concat!("Get the raw bit representation of the `f16`.")]
-            pub const fn to_bits(&self) -> u16 {
-                self.0
-            }
-        }
-} }
-
-cfg_if::cfg_if! { if #[cfg(feature = "num-complex")] {
-    pub use num_complex::Complex;
-} else {
-    /// A complex number in Cartesian form.
-    ///
-    /// Doesn't provide any arithmetic operations, but expose the real and imaginary parts.
-    /// Enable the `num-complex` feature to get a fully functional `Complex` type.
-    ///
-    /// `Complex<T>` is memory layout compatible with an array `[T; 2]`, which is compatible with
-    /// libc, numpy, etc.
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    #[repr(C)]
-    pub struct Complex<T> {
-        /// Real portion of the complex number
-        pub re: T,
-        /// Imaginary portion of the complex number
-        pub im: T,
-    }
-} }
-
-impl TryFrom<&str> for Dtype {
-    type Error = DtypeParseError;
-
-    fn try_from(s: &str) -> Result<Self, Self::Error> {
-        let mut chars = s.chars();
-        let first_char = chars
-            .next()
-            .ok_or_else(|| DtypeParseError::msg("Unexpected end of input"))?;
-        match first_char {
-            '[' | '(' | '{' => {
-                let ast = parse_ast(s)
-                    .map_err(|e| DtypeParseError::new(DtypeParseErrorKind::AstError(e)))?;
-                ast2dtype(ast)
-            }
-            _ => parse_scalar_dtype(s),
-        }
+        _ => parse_scalar_dtype(s),
     }
 }
 fn parse_scalar_dtype(s: &str) -> Result<Dtype, DtypeParseError> {
@@ -265,16 +23,11 @@ fn parse_scalar_dtype(s: &str) -> Result<Dtype, DtypeParseError> {
     let first_char = chars
         .next()
         .ok_or(DtypeParseError::msg("Unexpected end of input"))?;
-    let native_endianness = if cfg!(target_endian = "little") {
-        Endianness::Little
-    } else {
-        Endianness::Big
-    };
     let (endianness, kind_char) = match first_char {
         '<' => (Endianness::Little, None),
         '>' => (Endianness::Big, None),
-        '|' | '=' => (native_endianness, None),
-        kind_char => (native_endianness, Some(kind_char)),
+        '|' | '=' => (Endianness::native(), None),
+        kind_char => (Endianness::native(), Some(kind_char)),
     };
     let kind_char = match kind_char {
         Some(kind_char) => kind_char,
@@ -395,13 +148,7 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
                 }
 
                 let field_itemsize = field_type.itemsize;
-                fields.insert(
-                    name,
-                    DtypeSubfield {
-                        dtype: field_type,
-                        offset: struct_size,
-                    },
-                );
+                fields.insert(name, (struct_size, field_type));
                 struct_size += field_itemsize;
             }
 
@@ -528,19 +275,13 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
                     return Err(DtypeParseError::new(DtypeParseErrorKind::DuplicateKey))
                         .context(name);
                 }
-                fields.insert(
-                    name,
-                    DtypeSubfield {
-                        dtype: format,
-                        offset,
-                    },
-                );
+                fields.insert(name, (offset, format));
             }
 
             let alignment = if aligned {
                 let alignment = fields
                     .values()
-                    .map(|f| f.dtype.alignment)
+                    .map(|(_offset, dtype)| dtype.alignment)
                     .max()
                     .unwrap_or(1);
                 itemsize = ceil_to_multiple(itemsize, alignment);
@@ -549,12 +290,13 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
                 1
             };
 
-            Ok(Dtype {
-                kind: DtypeKind::Struct { fields },
-                shape: Vec::new(),
+            Dtype::new(
+                DtypeKind::Struct { fields },
+                Vec::new(),
                 itemsize,
                 alignment,
-            })
+            )
+            .map_err(|e| DtypeParseError::new(DtypeParseErrorKind::DtypeError(e)))
         }
         Node::Literal(_) => Err(DtypeParseError::msg(
             "Expected a list, tuple, or dict for ast2dtype",
@@ -562,14 +304,14 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DtypeParseError {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DtypeParseError {
     kind: DtypeParseErrorKind,
     backtrace: Vec<Cow<'static, str>>,
 }
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DtypeParseErrorKind {
-    AstError(crate::ndarray::ast::ParseError), // { msg: &'static str, pos: usize },
+    AstError(crate::ndarray::dtype::ast::ParseError), // { msg: &'static str, pos: usize },
     ParseIntError(ParseIntError),
     UnsupportedScalar,
     ExpectedLiteral,
@@ -578,6 +320,7 @@ enum DtypeParseErrorKind {
     ExpectedList,
     DuplicateKey,
     MissingKey(&'static str),
+    DtypeError(DtypeError),
     Other(Cow<'static, str>),
 }
 impl DtypeParseError {
@@ -608,6 +351,7 @@ impl std::fmt::Display for DtypeParseError {
             DtypeParseErrorKind::MissingKey(key) => {
                 write!(f, "Missing required key: {key}")
             }
+            DtypeParseErrorKind::DtypeError(err) => std::fmt::Display::fmt(err, f),
             DtypeParseErrorKind::Other(cow) => f.write_str(cow),
         }
     }
@@ -665,44 +409,6 @@ impl Node {
     }
 }
 
-fn ceil_to_multiple(x: usize, m: usize) -> usize {
-    assert!(m > 0);
-    x.div_ceil(m) * m
-}
-
-pub(crate) fn scalar_dtype(kind: DtypeScalarKind) -> Dtype {
-    let native_endianness = if cfg!(target_endian = "little") {
-        Endianness::Little
-    } else {
-        Endianness::Big
-    };
-    let (itemsize, alignment) = match kind {
-        DtypeScalarKind::I8 => (1, 1),
-        DtypeScalarKind::I16 => (2, 2),
-        DtypeScalarKind::I32 => (4, 4),
-        DtypeScalarKind::I64 => (8, 8),
-        DtypeScalarKind::U8 => (1, 1),
-        DtypeScalarKind::U16 => (2, 2),
-        DtypeScalarKind::U32 => (4, 4),
-        DtypeScalarKind::U64 => (8, 8),
-        DtypeScalarKind::F16 => (2, 2),
-        DtypeScalarKind::F32 => (4, 4),
-        DtypeScalarKind::F64 => (8, 8),
-        DtypeScalarKind::ComplexF32 => (8, 4),
-        DtypeScalarKind::ComplexF64 => (16, 8),
-        DtypeScalarKind::Bool => (1, 1),
-    };
-    Dtype {
-        kind: DtypeKind::Scalar {
-            kind,
-            endianness: native_endianness,
-        },
-        shape: Vec::new(),
-        itemsize,
-        alignment,
-    }
-}
-
 impl Dtype {
     pub(crate) fn to_numpy_str(&self) -> String {
         struct FormatAsNumpy<'a>(&'a Dtype);
@@ -737,7 +443,7 @@ impl Dtype {
         }
         match &self.kind {
             DtypeKind::Scalar { kind, endianness } => {
-                let plain_dtype = scalar_dtype(*kind);
+                let plain_dtype = Dtype::of_scalar(*kind);
                 if plain_dtype.itemsize != itemsize && shape_size > 0 {
                     crate::trace!(
                         "Dtype itemsize mismatch: expected {}, got {} ({:?})",
@@ -789,24 +495,24 @@ impl Dtype {
                 f.write_char('{')?;
 
                 let mut fields = fields.iter().collect::<Vec<_>>();
-                fields.sort_by_key(|(_, field)| field.offset);
+                fields.sort_by_key(|(_, (offset, _field))| *offset);
 
                 let aligned = self.alignment > 1;
                 if aligned {
                     // make sure offsets are as expected with aligned=True
                     let mut expected_offset = 0;
-                    for (f_name, field) in &fields {
-                        expected_offset = ceil_to_multiple(expected_offset, field.dtype.alignment);
-                        if field.offset != expected_offset {
+                    for (f_name, (offset, field)) in &fields {
+                        expected_offset = ceil_to_multiple(expected_offset, field.alignment);
+                        if *offset != expected_offset {
                             crate::trace!(
                                 "Unexpected dtype field offset for field '{}': expected {}, got {}",
                                 f_name,
                                 expected_offset,
-                                field.offset
+                                offset
                             );
                             return Err(std::fmt::Error);
                         }
-                        expected_offset += field.dtype.itemsize;
+                        expected_offset += field.itemsize;
                     }
                 }
 
@@ -818,16 +524,16 @@ impl Dtype {
                 f.write_char(',')?;
 
                 f.write_str("'formats':[")?;
-                for (_f_name, field) in &fields {
-                    field.dtype.write_as_numpy_str(f, true)?;
+                for (_f_name, (offset, field)) in &fields {
+                    field.write_as_numpy_str(f, true)?;
                     f.write_char(',')?;
                 }
                 f.write_char(']')?;
                 f.write_char(',')?;
 
                 f.write_str("'offsets':[")?;
-                for (_f_name, field) in &fields {
-                    write!(f, "{},", field.offset)?;
+                for (_f_name, (offset, field)) in &fields {
+                    write!(f, "{},", offset)?;
                 }
                 f.write_char(']')?;
                 f.write_char(',')?;
@@ -856,12 +562,14 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use crate::{Dtype, DtypeKind, DtypeScalarKind, DtypeSubfield};
+    use crate::{Dtype, DtypeKind, DtypeScalarKind};
 
     #[test]
     fn dtype_from_str() {
-        use super::scalar_dtype as sdtype;
+        // use super::Dtype::of_scalar as sdtype;
         use DtypeScalarKind as SKind;
+
+        let sdtype = |x| super::Dtype::of_scalar(x);
 
         let dtypes = [
             ("|i1", sdtype(SKind::I8)),
@@ -928,17 +636,11 @@ mod tests {
                         fields: HashMap::from([
                             (
                                 "a".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::I32),
-                                    offset: 0,
-                                },
+                                (0, sdtype(SKind::I32)),
                             ),
                             (
                                 "b".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::F64),
-                                    offset: 4,
-                                },
+                                (4, sdtype(SKind::F64)),
                             ),
                         ]),
                     },
@@ -952,17 +654,11 @@ mod tests {
                         fields: HashMap::from([
                             (
                                 "a".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::I32),
-                                    offset: 0,
-                                },
+                                (0, sdtype(SKind::I32)),
                             ),
                             (
                                 "b".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::F64),
-                                    offset: 8,
-                                },
+                                (8, sdtype(SKind::F64)),
                             ),
                         ]),
                     },
@@ -978,17 +674,11 @@ mod tests {
                         fields: HashMap::from([
                             (
                                 "a".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::I32),
-                                    offset: 0,
-                                },
+                                (0, sdtype(SKind::I32)),
                             ),
                             (
                                 "b".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::F64),
-                                    offset: 8,
-                                },
+                                (8, sdtype(SKind::F64)),
                             ),
                         ]),
                     },
@@ -1004,21 +694,15 @@ mod tests {
                         fields: HashMap::from([
                             (
                                 "a".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::I32),
-                                    offset: 0,
-                                },
+                                (0, sdtype(SKind::I32))
                             ),
                             (
                                 "b".to_string(),
-                                DtypeSubfield {
-                                    dtype: Dtype {
-                                        shape: vec![2, 3, 4],
-                                        itemsize: 192,
-                                        ..sdtype(SKind::F64)
-                                    },
-                                    offset: 4,
-                                },
+                                (4, Dtype {
+                                    shape: vec![2, 3, 4],
+                                    itemsize: 192,
+                                    ..sdtype(SKind::F64)
+                                }),
                             ),
                         ]),
                     },
@@ -1034,21 +718,15 @@ mod tests {
                         fields: HashMap::from([
                             (
                                 "a".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::I32),
-                                    offset: 0,
-                                },
+                                (0, sdtype(SKind::I32))
                             ),
                             (
                                 "b".to_string(),
-                                DtypeSubfield {
-                                    dtype: Dtype {
-                                        shape: vec![2, 3, 4],
-                                        itemsize: 192,
-                                        ..sdtype(SKind::F64)
-                                    },
-                                    offset: 8,
-                                },
+                                (8, Dtype {
+                                    shape: vec![2, 3, 4],
+                                    itemsize: 192,
+                                    ..sdtype(SKind::F64)
+                                }),
                             ),
                         ]),
                     },
@@ -1064,21 +742,15 @@ mod tests {
                         fields: HashMap::from([
                             (
                                 "a".to_string(),
-                                DtypeSubfield {
-                                    dtype: sdtype(SKind::I32),
-                                    offset: 0,
-                                },
+                                (0, sdtype(SKind::I32))
                             ),
                             (
                                 "b".to_string(),
-                                DtypeSubfield {
-                                    dtype: Dtype {
-                                        shape: vec![2, 3, 4],
-                                        itemsize: 192,
-                                        ..sdtype(SKind::F64)
-                                    },
-                                    offset: 8,
-                                },
+                                (8, Dtype {
+                                    shape: vec![2, 3, 4],
+                                    itemsize: 192,
+                                    ..sdtype(SKind::F64)
+                                }),
                             ),
                         ]),
                     },
@@ -1090,11 +762,11 @@ mod tests {
         ];
 
         for (dtype_str, expected_dtype) in dtypes {
-            let dtype = Dtype::try_from(dtype_str);
+            let dtype = Dtype::from_numpy_str(dtype_str);
             assert_eq!(dtype, Ok(expected_dtype.clone()));
 
             let dtype_str2 = dtype.unwrap().to_numpy_str();
-            let dtype2 = Dtype::try_from(dtype_str2.as_str());
+            let dtype2 = Dtype::from_numpy_str(dtype_str2.as_str());
             assert_eq!(dtype2, Ok(expected_dtype));
         }
     }
