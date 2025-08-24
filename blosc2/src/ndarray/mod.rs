@@ -549,9 +549,9 @@ impl Ndarray {
         unsafe { std::slice::from_raw_parts(self.arr().shape.as_ptr(), self.ndim()) }
     }
 
-    /// Get the data type of the array as a numpy-like dtype string.
-    pub fn dtype_str(&self) -> &str {
-        self.dtype_cstr().to_str().unwrap()
+    /// Get the data type of the array.
+    pub fn dtype(&self) -> &Dtype {
+        &self.dtype
     }
 
     fn dtype_cstr(&self) -> &std::ffi::CStr {
@@ -575,6 +575,12 @@ impl Ndarray {
     /// Get the shape of blocks in the ndarary.
     pub fn blockshape(&self) -> &[i32] {
         unsafe { std::slice::from_raw_parts(self.arr().blockshape.as_ptr(), self.ndim()) }
+    }
+
+    /// Check whether the array is contiguous or sparse.
+    pub fn is_contiguous(&self) -> bool {
+        let storage = unsafe { self.arr().sc.as_ref().unwrap().storage.as_ref().unwrap() };
+        storage.contiguous
     }
 
     /// Get an [`ndarray::Array`] with the data copied from this ndarray.
@@ -1410,7 +1416,7 @@ mod tests {
             let array2 = array1.copy_to(storage2.params(), &params2).unwrap();
 
             assert_eq!(array1.shape(), array2.shape());
-            assert_eq!(array1.dtype_str(), array2.dtype_str());
+            assert_eq!(array1.dtype(), array2.dtype());
             assert_eq!(array1.to_items().unwrap(), array2.to_items().unwrap());
         }
     }
