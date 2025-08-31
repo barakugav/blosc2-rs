@@ -1,14 +1,54 @@
 use std::cell::RefCell;
 use std::mem::MaybeUninit;
 
+use crate::chunk::Decoder;
 use crate::error::ErrorCode;
 use crate::util::{validate_compressed_buf_and_get_sizes, CowVec};
-use crate::{DParams, Decoder, Error};
+use crate::{DParams, Error};
 
 /// A chunk of compressed data.
 ///
-/// A chunk is a thin wrapper around `CowVec<u8>`, with some additional metadata, and the creation
-/// of a `Chunk` through the [`Self::from_compressed`] is very cheap.
+/// A chunk is a thin wrapper around `CowVec<u8>`, with some additional metadata.
+/// It is usually created using an [`Encoder`](crate::chunk::Encoder), or by accessing a
+/// [`SChunk`](crate::chunk::SChunk).
+///
+/// ```rust
+/// use blosc2::{CParams, DParams};
+/// use blosc2::chunk::{Chunk, Decoder, Encoder};
+///
+/// let data: [i32; 7] = [1, 2, 3, 4, 5, 6, 7];
+/// let i32len = std::mem::size_of::<i32>();
+/// let data_bytes =
+///     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * i32len) };
+///
+/// // Compress the data into a Chunk
+/// let cparams = CParams::default()
+///     .typesize(i32len)
+///     .unwrap()
+///     .clevel(5)
+///     .nthreads(2)
+///     .clone();
+/// let chunk: Chunk = Encoder::new(cparams)
+///     .unwrap()
+///     .compress(&data_bytes)
+///     .unwrap();
+/// let chunk_bytes: &[u8] = chunk.as_bytes();
+///
+/// // Decompress the Chunk
+/// let dparams = DParams::default();
+/// let decompressed = Decoder::new(dparams)
+///     .unwrap()
+///     .decompress(chunk_bytes)
+///     .unwrap();
+///
+/// // Check that the decompressed data matches the original
+/// assert_eq!(data_bytes, decompressed);
+///
+/// // A chunk support random access to individual items
+/// assert_eq!(&data_bytes[0..4], chunk.item(0).expect("failed to get the 0-th item"));
+/// assert_eq!(&data_bytes[12..16], chunk.item(3).expect("failed to get the 3-th item"));
+/// assert_eq!(&data_bytes[4..20], chunk.items(1..5).expect("failed to get items 1 to 4"));
+/// ```
 pub struct Chunk<'a> {
     pub(crate) buffer: CowVec<'a, u8>,
     pub(crate) nbytes: usize,
@@ -17,6 +57,10 @@ pub struct Chunk<'a> {
 }
 impl<'a> Chunk<'a> {
     /// Create a new `Chunk` from a compressed bytes buffer.
+    ///
+    /// The compressed bytes buffer is usually obtained using an [`Encoder`](crate::chunk::Encoder).
+    ///
+    /// This function is very cheap.
     pub fn from_compressed(bytes: CowVec<'a, u8>) -> Result<Self, Error> {
         let (nbytes, _cbytes, _blocksize) =
             validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
@@ -52,12 +96,12 @@ impl<'a> Chunk<'a> {
         }
     }
 
-    /// Get a reference to the underlying bytes buffer.
+    /// Get a reference to the underlying (compressed) bytes buffer.
     pub fn as_bytes(&self) -> &[u8] {
         self.buffer.as_slice()
     }
 
-    /// Convert the chunk into a bytes buffer.
+    /// Convert the chunk into a (compressed) bytes buffer.
     pub fn into_bytes(self) -> CowVec<'a, u8> {
         self.buffer
     }
@@ -118,6 +162,13 @@ impl<'a> Chunk<'a> {
     /// undefined behavior may occur. Alternatively, the caller can use [`Self::item_into`] and provide an already
     /// aligned destination buffer.
     ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index of the item to retrieve. Must be in range `[0, items_num())`.
+    ///
+    /// # Returns
+    ///
+    /// The decompressed item as a vector of bytes, of size `typesize`.
     pub fn item(&self, idx: usize) -> Result<Vec<u8>, Error> {
         self.items(idx..idx + 1)
     }
@@ -129,9 +180,13 @@ impl<'a> Chunk<'a> {
     /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
     /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
     ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index of the item to retrieve. Must be in range `[0, items_num())`.
+    ///
     /// # Returns
     ///
-    /// The number of bytes copied into the destination buffer.
+    /// The number of bytes copied into the destination buffer, `typesize`.
     pub fn item_into(&self, idx: usize, dst: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
         self.items_into(idx..idx + 1, dst)
     }
@@ -145,6 +200,14 @@ impl<'a> Chunk<'a> {
     /// the original data type, the bytes should be copied to a new aligned allocation before transmuting, otherwise
     /// undefined behavior may occur. Alternatively, the caller can use [`Self::items_into`] and provide an already
     /// aligned destination buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index range of the items to retrieve. Must be in range `[0, items_num())`.
+    ///
+    /// # Returns
+    ///
+    /// The decompressed items as a vector of bytes, of size `typesize * idx.len()`.
     pub fn items(&self, idx: std::ops::Range<usize>) -> Result<Vec<u8>, Error> {
         let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(self.typesize * idx.len());
         unsafe { dst.set_len(self.typesize * idx.len()) };
@@ -163,9 +226,13 @@ impl<'a> Chunk<'a> {
     /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
     /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
     ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index range of the items to retrieve. Must be in range `[0, items_num())`.
+    ///
     /// # Returns
     ///
-    /// The number of bytes copied into the destination buffer.
+    /// The number of bytes copied into the destination buffer, `typesize * idx.len()`.
     pub fn items_into(
         &self,
         idx: std::ops::Range<usize>,
@@ -218,9 +285,9 @@ pub(crate) mod tests {
 
     use rand::prelude::*;
 
-    use crate::chunk::Chunk;
+    use crate::chunk::{Chunk, Encoder};
     use crate::util::tests::{rand_cparams, rand_dparams, rand_src_len};
-    use crate::{CParams, Encoder};
+    use crate::CParams;
 
     #[test]
     fn get_item() {

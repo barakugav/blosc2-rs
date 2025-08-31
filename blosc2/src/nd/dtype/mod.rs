@@ -3,17 +3,84 @@ mod numpy_str;
 
 use std::collections::HashMap;
 
-use crate::ndarray::dtype::numpy_str::{parse_numpy_dtype_str, DtypeParseError};
+use crate::nd::dtype::numpy_str::{parse_numpy_dtype_str, DtypeParseError};
+use crate::util::{f16, Complex};
 
 /// Description of a type layout and inner fields.
 ///
-///
-/// blosc's [`Ndarray`](crate::ndarray) maintain the dtype of each array dynamically using a this type.
+/// blosc's [`Ndarray`](crate::nd::Ndarray) maintain the dtype of each array dynamically using a this type.
 /// A `Dtype` represent the layout (size and alignment) and inner fields of every element in an ndarray.
-/// Such dtype can be either a scalar (of one [`DtypeScalarKind`]) or a struct containing inner fields, each with its
+/// Such dtype can be either a scalar (one of [`DtypeScalarKind`]) or a struct containing inner fields, each with its
 /// own name, offset and dtype.
 /// In addition, a `Dtype` has a shape attribute, representing multiples elements of the same "base" type, similar to
 /// numpy.
+///
+/// # Examples
+/// ```rust
+/// use blosc2::nd::{Dtype, Dtyped, DtypeScalarKind};
+/// use std::collections::HashMap;
+///
+/// #[derive(Debug, Clone, Copy, PartialEq)]
+/// #[repr(C, packed)]
+/// pub(crate) struct Point {
+///     x: i32,
+///     y: u32,
+///     z: i32,
+/// }
+/// unsafe impl Dtyped for Point {
+///     fn dtype() -> Dtype {
+///         Dtype::of_struct(HashMap::from([
+///             ("x".into(), (0, Dtype::of_scalar(DtypeScalarKind::I32))),
+///             ("y".into(), (4, Dtype::of_scalar(DtypeScalarKind::U32))),
+///             ("z".into(), (8, Dtype::of_scalar(DtypeScalarKind::I32))),
+///         ]))
+///         .unwrap()
+///     }
+/// }
+///
+/// #[derive(Debug, Clone, Copy, PartialEq)]
+/// #[repr(C, packed)]
+/// pub(crate) struct Person {
+///     height: i32,
+///     weight: i64,
+/// }
+/// unsafe impl Dtyped for Person {
+///     fn dtype() -> Dtype {
+///         Dtype::of_struct(HashMap::from([
+///             ("height".into(), (0, Dtype::of_scalar(DtypeScalarKind::I32))),
+///             ("weight".into(), (4, Dtype::of_scalar(DtypeScalarKind::I64))),
+///         ]))
+///         .unwrap()
+///     }
+/// }
+///
+/// #[derive(Debug, Clone, Copy, PartialEq)]
+/// #[repr(C)]
+/// pub(crate) struct PersonAligned {
+///     height: i32,
+///     weight: i64,
+/// }
+/// unsafe impl Dtyped for PersonAligned {
+///     fn dtype() -> Dtype {
+///         Dtype::of_struct(HashMap::from([
+///             ("height".into(), (0, Dtype::of_scalar(DtypeScalarKind::I32))),
+///             ("weight".into(), (8, Dtype::of_scalar(DtypeScalarKind::I64))),
+///         ]))
+///         .unwrap()
+///     }
+/// }
+///
+/// #[derive(Debug, Clone, Copy, PartialEq)]
+/// #[repr(C)]
+/// pub(crate) struct AudioSample([[f32; 2]; 16]);
+/// unsafe impl Dtyped for AudioSample {
+///     fn dtype() -> Dtype {
+///         Dtype::of_scalar(DtypeScalarKind::F32)
+///             .with_shape(vec![16, 2])
+///             .unwrap()
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dtype {
     kind: DtypeKind,
@@ -101,7 +168,7 @@ impl Dtype {
     ///
     /// The fields should be either in packed or aligned offsets, custom offsets are not supported.
     /// There are some cases in which it is ambiguous whether the offsets are packed or aligned, and it may affect the
-    /// computed total itemsize of the struct. In cases, consider using the explicit [`Self::new`].
+    /// computed total itemsize of the struct. In these cases, consider using the explicit [`Self::new`].
     pub fn of_struct(fields: HashMap<String, (usize, Dtype)>) -> Result<Self, DtypeError> {
         fn determine_itemsize_and_alignment(
             fields: &HashMap<String, (usize, Dtype)>,
@@ -158,7 +225,7 @@ impl Dtype {
 
     /// Creates a new dtype by specifying all of the parameters explicitly.
     ///
-    /// This shape, itemsize and alignment will be validated against the kind. See [`DtypeError`] for their constraints.
+    /// Thw shape, itemsize and alignment will be validated against the kind. See [`DtypeError`] for their constraints.
     pub fn new(
         kind: DtypeKind,
         shape: Vec<usize>,
@@ -266,14 +333,16 @@ impl Dtype {
 
     /// Get the itemsize of the dtype.
     ///
-    /// If this dtype has a shape, the itemsize is the product of the shape dimensions times the base itemsize.
+    /// If this dtype has a shape, the itemsize is the product of the shape dimensions and the base itemsize.
     pub fn itemsize(&self) -> usize {
         self.itemsize
     }
 
     /// Get the alignment of the dtype.
     ///
-    /// The alignment is either 1 for packed dtypes, or the maximum alignment of any field for aligned dtypes.
+    /// For scalar dtypes, the alignment is the same as [`DtypeScalarKind::alignment()`].
+    /// For struct dtypes, the alignment is either `1` for packed dtypes, or the maximum alignment of the inner fields
+    /// for aligned structs.
     pub fn alignment(&self) -> usize {
         self.alignment
     }
@@ -300,12 +369,12 @@ impl Dtype {
 
     /// Create a new dtype from a numpy dtype string.
     ///
-    /// See https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing for the full
+    /// See <https://numpy.org/doc/stable/reference/arrays.dtypes.html#arrays-dtypes-constructing> for the full
     /// definitions.
     ///
     /// # Examples
     /// ```rust
-    /// use blosc2::{Dtype, Dtyped};
+    /// use blosc2::nd::{Dtype, Dtyped};
     ///
     /// // An packed point struct, with size 12 and alignment 1
     /// #[derive(Debug, Clone, Copy, PartialEq)]
@@ -364,6 +433,7 @@ impl Dtype {
 
 /// Error that can happen when creating a new [`Dtype`]
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DtypeError {
     /// Invalid field offsets.
     ///
@@ -405,7 +475,8 @@ impl std::fmt::Display for DtypeError {
     }
 }
 impl DtypeScalarKind {
-    fn itemsize(&self) -> usize {
+    /// Get the size of the scalar in bytes.
+    pub fn itemsize(&self) -> usize {
         match self {
             Self::I8 => 1,
             Self::I16 => 2,
@@ -423,7 +494,8 @@ impl DtypeScalarKind {
             Self::Bool => 1,
         }
     }
-    fn alignment(&self) -> usize {
+    /// Get the alignment of the scalar in bytes.
+    pub fn alignment(&self) -> usize {
         match self {
             Self::I8 => 1,
             Self::I16 => 2,
@@ -456,14 +528,14 @@ impl Endianness {
 ///
 /// A trait for types that can be represented by a [`Dtype`].
 ///
-/// blosc's [`Ndarray`](crate::ndarray) maintain the dtype of each array dynamically using a [`Dtype`].
+/// blosc's [`Ndarray`](crate::nd::Ndarray) maintain the dtype of each array dynamically using a [`Dtype`].
 /// For safe conversions between (typed erased) `Ndarray` and other typed arrays (for example [`ndarray::ArrayBase`])
 /// the `Dtyped` trait is used to verify type compatibility.
 ///
 /// # Safety
 ///
 /// This trait is very unsafe, and the caller should implement it carefully, matching the type size,
-/// alignment and inner fields to the type. Types implementing this should most likely have `#[repr(C)]`
+/// alignment and inner fields of the type. Types implementing this should most likely be annotated with `#[repr(C)]`
 /// or `#[repr(C, packed)]`, for aligned and packed fields respectively.
 pub unsafe trait Dtyped: Copy + 'static {
     /// Get the dtype representing the type layout and inner fields.
@@ -493,50 +565,6 @@ impl_dtyped_scalar!(f64, F64);
 impl_dtyped_scalar!(Complex<f32>, ComplexF32);
 impl_dtyped_scalar!(Complex<f64>, ComplexF64);
 impl_dtyped_scalar!(bool, Bool);
-
-cfg_if::cfg_if! { if #[cfg(feature = "half")] {
-    pub use half::f16;
-} else {
-        /// A 16-bit floating point type implementing the IEEE 754-2008 standard [`binary16`] a.k.a "half"
-        /// format.
-        ///
-        /// Doesn't provide any arithmetic operations, but can be converted to/from `u16`.
-        /// Enable the `half` feature to get a fully functional `f16` type.
-        #[derive(Copy, Clone, Debug, Default)]
-        #[repr(transparent)]
-        #[allow(non_camel_case_types)]
-        pub struct f16(u16);
-        impl f16 {
-            #[doc = concat!("Creates a new `f16` from its raw bit representation.")]
-            pub const fn from_bits(bits: u16) -> Self {
-                Self(bits)
-            }
-            #[doc = concat!("Get the raw bit representation of the `f16`.")]
-            pub const fn to_bits(&self) -> u16 {
-                self.0
-            }
-        }
-} }
-
-cfg_if::cfg_if! { if #[cfg(feature = "num-complex")] {
-    pub use num_complex::Complex;
-} else {
-    /// A complex number in Cartesian form.
-    ///
-    /// Doesn't provide any arithmetic operations, but expose the real and imaginary parts.
-    /// Enable the `num-complex` feature to get a fully functional `Complex` type.
-    ///
-    /// `Complex<T>` is memory layout compatible with an array `[T; 2]`, which is compatible with
-    /// libc, numpy, etc.
-    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
-    #[repr(C)]
-    pub struct Complex<T> {
-        /// Real portion of the complex number
-        pub re: T,
-        /// Imaginary portion of the complex number
-        pub im: T,
-    }
-} }
 
 fn ceil_to_multiple(x: usize, m: usize) -> usize {
     assert!(m > 0);

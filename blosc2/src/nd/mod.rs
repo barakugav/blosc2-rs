@@ -1,22 +1,28 @@
+//! n-dimensional arrays with compressed storage (blosc2 NDarray, b2nd).
+//!
+//! The [`Ndarray`] struct is the main struct in this module, representing an n-dimensional array with
+//! compressed storage. See its documentation for more details.
+
 mod dtype;
 pub use dtype::*;
 
 mod params;
 pub use params::*;
 
+use std::ffi::CString;
 use std::mem::MaybeUninit;
 use std::path::Path;
 use std::ptr::NonNull;
 
-use crate::error::ErrorCode;
+use crate::chunk::{SChunk, SChunkOpenOptions, SChunkStorageParams};
+use crate::error::{Error, ErrorCode};
 use crate::util::{path2cstr, ArrayVec};
-use crate::{Error, SChunk, SChunkOpenOptions, SChunkStorageParams};
 
 /// The maximum number of dimensions for an Ndarray.
 pub const MAX_DIM: usize = blosc2_sys::B2ND_MAX_DIM as usize;
 type DimVec<T> = ArrayVec<T, MAX_DIM>;
 
-/// An n-dimensional array, called b2nd in blosc2.
+/// An n-dimensional array with compressed storage (blosc2 NDarray, b2nd).
 ///
 /// The array stores elements of a specific data type, in an n-dimensional layout.
 /// Differing from [`ndarray::ArrayBase`], both the type and the number of dimensions are managed at runtime and are
@@ -26,18 +32,28 @@ type DimVec<T> = ArrayVec<T, MAX_DIM>;
 ///
 /// Construction of a new array can be done by many ways such as initializing a new array with a repeated value,
 /// reading an array from disk, copying from existing [`ndarray::ArrayBase`] or blosc ndarray, etc.
-/// Many of these functions accept an [`NdarrayParams`] struct that specify the dtype, shape and
-/// compression/decompression settings.
+/// Many of these functions accept an [`NdarrayParams`] struct that specify the compression/decompression settings.
+///
+/// Some of the functions of the struct are used to convert from/to arrays from the `ndarray` crate,
+/// which may introduce some confusion about the term "ndarray". In most cases we refer to the
+/// `ndarray` crate when we say "ndarray", while we refer to "blosc ndarray" or "b2nd" when
+/// talking about the compressed arrays in this module.
+/// For example, [`Ndarray::from_ndarray`] and [`Ndarray::to_ndarray`] are conversion from/to [`ndarray::ArrayBase`]
+/// to/from a blosc ndarray, and [`Ndarray::slice_blosc`] returns a slice as a blosc ndarray.
 ///
 /// ```rust
-/// use blosc2::{Ndarray, NdarrayParams};
+/// use blosc2::nd::{Ndarray, NdarrayParams};
 ///
 /// let arr = Ndarray::from_ndarray(
-///     &ndarray::array!([1, 2, 3], [4, 5, 6], [7, 8, 9]),
+///     &ndarray::array!([1_i32, 2, 3], [4, 5, 6], [7, 8, 9]),
 ///     NdarrayParams::default()
-///         .chunkshape(&[2, 2])
-///         .blockshape(&[1, 1]),
+///         .chunkshape(Some(&[2, 2]))
+///         .blockshape(Some(&[1, 1])),
 /// ).unwrap();
+///
+/// assert_eq!(4, arr.get::<i32>(&[1, 0]).unwrap());
+/// assert_eq!(9, arr.get::<i32>(&[2, 2]).unwrap());
+///
 /// let slice_arr: ndarray::Array2<i32> = arr.slice(&[0..2, 1..3]).unwrap();
 /// assert_eq!(slice_arr, ndarray::array![[2, 3], [5, 6]]);
 /// ```
@@ -47,34 +63,34 @@ pub struct Ndarray {
 }
 impl Ndarray {
     fn new_impl(
-        value: &InitArgs,
+        value: InitArgs,
         storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
         let mut cparams = params.cparams.clone();
         let mut dparams = params.dparams.clone();
 
-        let dtype;
+        let dtype2;
         let dtype_cstr;
-        let shape;
+        let shape2;
         let chunkshape;
         let blockshape;
         match &value {
-            InitArgs::Zeros
-            | InitArgs::Nans
-            | InitArgs::Uninit
-            | InitArgs::RepeatedValue(_)
-            | InitArgs::CopyFromValuesBuf(_) => {
-                let dtype_and_str = params.dtype_required()?;
-                (dtype, dtype_cstr) = (dtype_and_str.0, dtype_and_str.1.as_c_str());
-                shape = params.shape_required()?.as_slice();
+            InitArgs::Zeros(dtype, shape)
+            | InitArgs::Nans(dtype, shape)
+            | InitArgs::Uninit(dtype, shape)
+            | InitArgs::RepeatedValue(dtype, _, shape)
+            | InitArgs::CopyFromValuesBuf(dtype, _, shape) => {
+                dtype2 = dtype;
+                dtype_cstr = std::borrow::Cow::Owned(CString::new(dtype.to_numpy_str()).unwrap());
+                shape2 = shape.as_slice();
                 chunkshape = params.chunkshape_required()?.as_slice();
                 blockshape = params.blockshape_required()?.as_slice();
             }
             InitArgs::CopyFromNdarray(ndarray) => {
-                dtype = &ndarray.dtype;
-                dtype_cstr = ndarray.dtype_cstr();
-                shape = ndarray.shape();
+                dtype2 = &ndarray.dtype;
+                dtype_cstr = ndarray.dtype_cstr().into();
+                shape2 = ndarray.shape();
                 chunkshape = params
                     .chunkshape
                     .as_ref()
@@ -87,6 +103,8 @@ impl Ndarray {
                     .unwrap_or_else(|| ndarray.blockshape());
             }
         }
+        let dtype = dtype2;
+        let shape = shape2;
 
         cparams.typesize(dtype.itemsize()).inspect_err(|_| {
             crate::trace!("Invalid dtype: {}", dtype_cstr.to_str().unwrap());
@@ -117,18 +135,22 @@ impl Ndarray {
             shape,
             chunkshape,
             blockshape,
-            dtype_cstr,
+            dtype_cstr.as_ref(),
             blosc2_sys::DTYPE_NUMPY_FORMAT as _,
         )?;
 
         let mut array = MaybeUninit::<*mut blosc2_sys::b2nd_array_t>::uninit();
         let res = match value {
-            InitArgs::Zeros => unsafe { blosc2_sys::b2nd_zeros(ctx.as_ptr(), array.as_mut_ptr()) },
-            InitArgs::Nans => unsafe { blosc2_sys::b2nd_nans(ctx.as_ptr(), array.as_mut_ptr()) },
-            InitArgs::Uninit => unsafe {
+            InitArgs::Zeros(_, _) => unsafe {
+                blosc2_sys::b2nd_zeros(ctx.as_ptr(), array.as_mut_ptr())
+            },
+            InitArgs::Nans(_, _) => unsafe {
+                blosc2_sys::b2nd_nans(ctx.as_ptr(), array.as_mut_ptr())
+            },
+            InitArgs::Uninit(_, _) => unsafe {
                 blosc2_sys::b2nd_uninit(ctx.as_ptr(), array.as_mut_ptr())
             },
-            InitArgs::RepeatedValue(value) => {
+            InitArgs::RepeatedValue(_, value, _) => {
                 if value.len() != dtype.itemsize() {
                     crate::trace!(
                         "Repeated value length {} does not match dtype itemsize {}",
@@ -141,7 +163,7 @@ impl Ndarray {
                     blosc2_sys::b2nd_full(ctx.as_ptr(), array.as_mut_ptr(), value.as_ptr().cast())
                 }
             }
-            InitArgs::CopyFromValuesBuf(items) => {
+            InitArgs::CopyFromValuesBuf(_, items, _) => {
                 let expected_length =
                     dtype.itemsize() * shape.iter().map(|s| *s as usize).product::<usize>();
                 if items.len() != expected_length {
@@ -178,24 +200,26 @@ impl Ndarray {
     ///
     /// # Arguments
     ///
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
+    /// * `shape` - The shape of the new ndarray.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
     ///
     /// For example, the following code creates a new ndarray of shape `[100, 20, 4]` filled with 32 bit integer zeros:
     /// ```rust
-    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::nd::{Ndarray, NdarrayParams};
     ///
-    /// let arr = Ndarray::zeros(
+    /// let arr = Ndarray::zeros::<i32>(
+    ///     &[100, 20, 4],
     ///     NdarrayParams::default()
-    ///         .shape(&[100, 20, 4])
-    ///         .chunkshape(&[10, 4, 2])
-    ///         .blockshape(&[2, 2, 2])
-    ///         .dtype(i32::dtype())
-    ///         .unwrap(),
+    ///         .chunkshape(Some(&[10, 4, 2]))
+    ///         .blockshape(Some(&[2, 2, 2])),
     /// );
     /// assert!(arr.is_ok());
     /// ```
-    pub fn zeros(params: &NdarrayParams) -> Result<Self, Error> {
-        Self::new(&NdarrayInitValue::zero(), params)
+    pub fn zeros<T>(shape: &[usize], params: &NdarrayParams) -> Result<Self, Error>
+    where
+        T: Dtyped,
+    {
+        Self::new(NdarrayInitValue::zero::<T>(), shape, params)
     }
 
     /// Creates a new ndarray in memory filled with a given value.
@@ -203,27 +227,27 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `value` - The initial value for all elements in the array.
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
-    ///
-    /// The value must match the item size specified by the params dtype.
+    /// * `shape` - The shape of the new ndarray.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
     ///
     /// For example, the following code creates a new ndarray of shape `[64, 32, 32]` filled with 64 bit float ones:
     /// ```rust
-    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::nd::{Ndarray, NdarrayParams};
     ///
     /// let arr = Ndarray::full(
-    ///     &1.0_f64.to_ne_bytes(),
+    ///     1.0_f64,
+    ///     &[64, 32, 32],
     ///     NdarrayParams::default()
-    ///         .shape(&[64, 32, 32])
-    ///         .chunkshape(&[8, 4, 16])
-    ///         .blockshape(&[4, 4, 1])
-    ///         .dtype(f64::dtype())
-    ///         .unwrap(),
+    ///         .chunkshape(Some(&[8, 4, 16]))
+    ///         .blockshape(Some(&[4, 4, 1])),
     /// );
     /// assert!(arr.is_ok());
     /// ```
-    pub fn full(value: &[u8], params: &NdarrayParams) -> Result<Self, Error> {
-        Self::new(&NdarrayInitValue::value(value), params)
+    pub fn full<T>(value: T, shape: &[usize], params: &NdarrayParams) -> Result<Self, Error>
+    where
+        T: Dtyped,
+    {
+        Self::new(NdarrayInitValue::value::<T>(value), shape, params)
     }
 
     /// Creates a new ndarray in memory with a special value (zero/nan/uninit) or a repeated value.
@@ -231,26 +255,29 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `value` - The initial value for all elements in the array.
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
+    /// * `shape` - The shape of the new ndarray.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
     ///
     /// For example, the following code creates a new ndarray of shape `[12, 24, 8]` filled with uninitialized
     /// complex f64 values:
     /// ```rust
-    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::nd::{Ndarray, NdarrayInitValue, NdarrayParams};
     ///
     /// let arr = Ndarray::new(
-    ///     unsafe { &NdarrayInitValue::uninit()},
+    ///     unsafe { NdarrayInitValue::uninit::<blosc2::util::Complex::<f64>>()},
+    ///     &[12, 24, 8],
     ///     NdarrayParams::default()
-    ///         .shape(&[12, 24, 8])
-    ///         .chunkshape(&[6, 8, 1])
-    ///         .blockshape(&[3, 8, 1])
-    ///         .dtype(blosc2::Complex::<f64>::dtype())
-    ///         .unwrap(),
+    ///         .chunkshape(Some(&[6, 8, 1]))
+    ///         .blockshape(Some(&[3, 8, 1])),
     /// );
     /// assert!(arr.is_ok());
     /// ```
-    pub fn new(value: &NdarrayInitValue, params: &NdarrayParams) -> Result<Self, Error> {
-        Self::new_at(value, SChunkStorageParams::in_memory(), params)
+    pub fn new(
+        value: NdarrayInitValue,
+        shape: &[usize],
+        params: &NdarrayParams,
+    ) -> Result<Self, Error> {
+        Self::new_at(value, shape, SChunkStorageParams::in_memory(), params)
     }
 
     /// Creates a new ndarray on disk with a special value (zero/nan/uninit) or a repeated value.
@@ -258,14 +285,16 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `value` - The initial value for all elements in the array.
+    /// * `shape` - The shape of the new ndarray.
     /// * `urlpath` - The path to the new file on disk.
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
     pub fn new_on_disk(
-        value: &NdarrayInitValue,
+        value: NdarrayInitValue,
+        shape: &[usize],
         urlpath: &Path,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
-        Self::new_at(value, SChunkStorageParams::on_disk(urlpath), params)
+        Self::new_at(value, shape, SChunkStorageParams::on_disk(urlpath), params)
     }
 
     /// Creates a new ndarray at the given storage with a special value (zero/nan/uninit) or a repeated value.
@@ -273,21 +302,25 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `value` - The initial value for all elements in the array.
+    /// * `shape` - The shape of the new ndarray.
     /// * `storage` - The storage parameters for the ndarray. This is the most flexible option to specify the
     ///   location (in memory or on disk) and whether the storage is contiguous or not. See [`SChunkStorageParams`]
     ///   for more details.
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
     pub fn new_at(
-        value: &NdarrayInitValue,
+        value: NdarrayInitValue,
+        shape: &[usize],
         storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
+        let dtype = value.dtype;
+        let shape = DimVec::from_slice_fn(shape, |s| *s as i64).expect("Too many dimensions");
         Self::new_impl(
-            &match value.0 {
-                InitValueInner::Zero => InitArgs::Zeros,
-                InitValueInner::Nan => InitArgs::Nans,
-                InitValueInner::Uninit => InitArgs::Uninit,
-                InitValueInner::Value(v) => InitArgs::RepeatedValue(v),
+            match &value.value {
+                InitValueInner::Zero => InitArgs::Zeros(dtype, shape),
+                InitValueInner::Nan => InitArgs::Nans(dtype, shape),
+                InitValueInner::Uninit => InitArgs::Uninit(dtype, shape),
+                InitValueInner::Value(v) => InitArgs::RepeatedValue(dtype, v, shape),
             },
             storage,
             params,
@@ -299,7 +332,7 @@ impl Ndarray {
         Self::open_with_options(urlpath, &SChunkOpenOptions::default())
     }
 
-    /// Opens an existing ndarray from disk with a given options.
+    /// Opens an existing ndarray from disk with the given options.
     pub fn open_with_options(urlpath: &Path, options: &SChunkOpenOptions) -> Result<Self, Error> {
         crate::global::global_init();
 
@@ -320,49 +353,107 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `items` - The buffer containing the item data, with `typesize * prod(shape)` bytes.
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
+    /// * `shape` - The shape of the new ndarray.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
     ///
-    /// The items buffer size must match the dtype and shape specified by the params.
+    /// The items buffer size must match the shape.
     /// The elements should be laid out in memory according to the standard strides of the shape.
     ///
     /// ```rust
-    /// use blosc2::{Dtyped, Ndarray, NdarrayInitValue, NdarrayParams};
+    /// use blosc2::nd::{Ndarray, NdarrayParams};
+    ///
+    /// let arr = Ndarray::from_items(
+    ///     &[1_32, 2, 3, 4, 5, 6],
+    ///     &[2, 3],
+    ///     NdarrayParams::default()
+    ///         .chunkshape(Some(&[2, 1]))
+    ///         .blockshape(Some(&[1, 1])),
+    /// );
+    /// assert!(arr.is_ok());
+    /// ```
+    pub fn from_items<T>(
+        items: &[T],
+        shape: &[usize],
+        params: &NdarrayParams,
+    ) -> Result<Self, Error>
+    where
+        T: Dtyped,
+    {
+        let items_buf = unsafe {
+            std::slice::from_raw_parts(items.as_ptr().cast::<u8>(), std::mem::size_of_val(items))
+        };
+        Self::from_items_bytes(items_buf, T::dtype(), shape, params)
+    }
+
+    /// Creates a new in memory ndarray from a contiguous buffer of items.
+    ///
+    /// # Arguments
+    ///
+    /// * `items` - The buffer containing the item data, with `typesize * prod(shape)` bytes.
+    /// * `dtype` - The data type of the items.
+    /// * `shape` - The shape of the new ndarray.
+    /// * `params` - The parameters for the ndarray. The chunkshape and blockshape are required.
+    ///
+    /// The items buffer size must match the dtype and shape.
+    /// The elements should be laid out in memory according to the standard strides of the shape.
+    ///
+    /// ```rust
+    /// use blosc2::nd::{Dtyped, Ndarray, NdarrayParams};
     ///
     /// let data = [1_32, 2, 3, 4, 5, 6];
     /// let data_buf = unsafe {
     ///     std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(&data))
     /// };
-    /// let arr = Ndarray::from_items_buf(
+    /// let arr = Ndarray::from_items_bytes(
     ///     data_buf,
+    ///     i32::dtype(),
+    ///     &[2, 3],
     ///     NdarrayParams::default()
-    ///         .shape(&[2, 3])
-    ///         .chunkshape(&[2, 1])
-    ///         .blockshape(&[1, 1])
-    ///         .dtype(i32::dtype())
-    ///         .unwrap(),
+    ///         .chunkshape(Some(&[2, 1]))
+    ///         .blockshape(Some(&[1, 1])),
     /// );
     /// assert!(arr.is_ok());
     /// ```
-    pub fn from_items_buf(items: &[u8], params: &NdarrayParams) -> Result<Self, Error> {
-        Self::from_items_buf_at(items, SChunkStorageParams::in_memory(), params)
+    pub fn from_items_bytes(
+        items: &[u8],
+        dtype: Dtype,
+        shape: &[usize],
+        params: &NdarrayParams,
+    ) -> Result<Self, Error> {
+        Self::from_items_bytes_at(
+            items,
+            dtype,
+            shape,
+            SChunkStorageParams::in_memory(),
+            params,
+        )
     }
 
-    /// Creates a new ndarray at the given storage with a contiguous buffer of items.
+    /// Creates a new ndarray at the given storage from a contiguous buffer of items.
     ///
     /// # Arguments
     ///
     /// * `items` - The buffer containing the item data, with `typesize * prod(shape)` bytes.
+    /// * `dtype` - The data type of the items.
+    /// * `shape` - The shape of the new ndarray.
     /// * `storage` - The storage parameters for the ndarray. See [`SChunkStorageParams`] for more details.
-    /// * `params` - The parameters for the ndarray. The shape, chunkshape, blockshape and dtype are required.
+    /// * `params` - The parameters for the ndarray. The chunkshape, blockshape and dtype are required.
     ///
-    /// The items buffer size must match the dtype and shape specified by the params.
+    /// The items buffer size must match the dtype and shape.
     /// The elements should be laid out in memory according to the standard strides of the shape.
-    pub fn from_items_buf_at(
+    pub fn from_items_bytes_at(
         items: &[u8],
+        dtype: Dtype,
+        shape: &[usize],
         storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
-        Self::new_impl(&InitArgs::CopyFromValuesBuf(items), storage, params)
+        let shape = DimVec::from_slice_fn(shape, |s| *s as i64).expect("Too many dimensions");
+        Self::new_impl(
+            InitArgs::CopyFromValuesBuf(dtype, items, shape),
+            storage,
+            params,
+        )
     }
 
     /// Creates a new blosc ndarray from an existing [`ndarray::ArrayBase`].
@@ -370,19 +461,18 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `ndarray` - The source ndarray to copy data from.
-    /// * `params` - The parameters for the new ndarray. The chunkshape and blockshape are required, while shape and
-    ///   dtype are ignored and are derived from the given ndarray.
+    /// * `params` - The parameters for the new ndarray. The chunkshape and blockshape are required.
     ///
     /// The type `T` must implement the [`Dtyped`] trait, specifying its data type.
     ///
     /// ```rust
-    /// use blosc2::{Ndarray, NdarrayParams};
+    /// use blosc2::nd::{Ndarray, NdarrayParams};
     ///
     /// let arr = Ndarray::from_ndarray(
-    ///     &ndarray::array!([1, 2, 3], [4, 5, 6], [7, 8, 9]),
+    ///     &ndarray::array!([1_i32, 2, 3], [4, 5, 6], [7, 8, 9]),
     ///     NdarrayParams::default()
-    ///         .chunkshape(&[2, 2])
-    ///         .blockshape(&[1, 1]),
+    ///         .chunkshape(Some(&[2, 2]))
+    ///         .blockshape(Some(&[1, 1])),
     /// ).unwrap();
     /// let slice_arr: ndarray::Array2<i32> = arr.slice(&[0..2, 1..3]).unwrap();
     /// assert_eq!(slice_arr, ndarray::array![[2, 3], [5, 6]]);
@@ -406,8 +496,7 @@ impl Ndarray {
     ///
     /// * `ndarray` - The source ndarray to copy data from.
     /// * `storage` - The storage parameters for the new ndarray.
-    /// * `params` - The parameters for the new ndarray. The chunkshape and blockshape are required, while shape and
-    ///   dtype are ignored and are derived from the given ndarray.
+    /// * `params` - The parameters for the new ndarray. The chunkshape and blockshape are required.
     ///
     /// The type `T` must implement the [`Dtyped`] trait, specifying its data type.
     #[cfg(feature = "ndarray")]
@@ -429,13 +518,6 @@ impl Ndarray {
             );
             return Err(Error::InvalidParam);
         }
-        let shape = DimVec::from_slice(ndarray.shape());
-        // Safety: we know ndim <= MAX_DIM
-        let shape = unsafe { shape.unwrap_unchecked() };
-
-        let mut params = params.clone();
-        params.dtype(T::dtype())?;
-        params.shape(shape.as_slice());
 
         let data = ndarray.as_standard_layout();
         let data = data
@@ -445,7 +527,7 @@ impl Ndarray {
             std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), std::mem::size_of_val(data))
         };
 
-        Self::from_items_buf_at(data_buf, storage, &params)
+        Self::from_items_bytes_at(data_buf, T::dtype(), ndarray.shape(), storage, params)
     }
 
     /// Creates a new blosc ndarray from a raw pointer to a `blosc2_sys::b2nd_array_t`.
@@ -476,19 +558,51 @@ impl Ndarray {
 
 /// Represents initial value use to initialize an ndarray.
 ///
-/// This enum is used by [`Ndarray::new`] and its variants.
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub struct NdarrayInitValue<'a>(InitValueInner<'a>);
-impl<'a> NdarrayInitValue<'a> {
-    /// A value of zero.
-    pub fn zero() -> Self {
-        Self(InitValueInner::Zero)
+/// This struct is used by [`Ndarray::new`] and its variants, providing an initial value for all elements, and also
+/// determining the dtype of the created array.
+#[derive(Clone, Debug)]
+pub struct NdarrayInitValue {
+    dtype: Dtype,
+    value: InitValueInner,
+}
+impl NdarrayInitValue {
+    fn new(value: InitValueInner, dtype: Dtype) -> Self {
+        Self { dtype, value }
     }
-    /// NaN value (for types that support NaN, like `f32` and `f64`).
-    pub fn nan() -> Self {
-        Self(InitValueInner::Nan)
+
+    /// A zero value of type `T`.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and it will determine the created ndarray dtype.
+    pub fn zero<T>() -> Self
+    where
+        T: Dtyped,
+    {
+        Self::zero_of(T::dtype())
     }
-    /// Uninitialized value.
+
+    /// A zero value of the given dtype.
+    pub fn zero_of(dtype: Dtype) -> Self {
+        Self::new(InitValueInner::Zero, dtype)
+    }
+
+    /// A NaN value of type `T` (for types that support NaN, like `f32` and `f64`).
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and it will determine the created ndarray dtype.
+    pub fn nan<T>() -> Self
+    where
+        T: Dtyped,
+    {
+        Self::nan_of(T::dtype())
+    }
+
+    /// A NaN value of the given dtype (for types that support NaN, like `f32` and `f64`).
+    pub fn nan_of(dtype: Dtype) -> Self {
+        Self::new(InitValueInner::Nan, dtype)
+    }
+
+    /// An uninitialized value of type `T`.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and it will determine the created ndarray dtype.
     ///
     /// # Safety
     ///
@@ -497,40 +611,71 @@ impl<'a> NdarrayInitValue<'a> {
     /// this function is marked unsafe for the caller to acknowledge the potential risks.
     /// The caller must ensure to write to all elements before reading them, after an array with uninit values is
     /// created.
-    pub unsafe fn uninit() -> Self {
-        Self(InitValueInner::Uninit)
+    pub unsafe fn uninit<T>() -> Self
+    where
+        T: Dtyped,
+    {
+        Self::uninit_of(T::dtype())
     }
-    /// A specific value.
+
+    /// An uninitialized value of the given dtype.
     ///
-    /// The value must have the same size as the dtype specified in [`NdarrayParams`]
-    pub fn value(value: &'a [u8]) -> Self {
-        Self(InitValueInner::Value(value))
+    /// # Safety
+    ///
+    /// An ndarray created with uninit values does not enforce the unsafe properties of its elements using the type
+    /// system, and all the regular functions are marked as safe, but may lead to UB if not used carefully. Therefore,
+    /// this function is marked unsafe for the caller to acknowledge the potential risks.
+    /// The caller must ensure to write to all elements before reading them, after an array with uninit values is
+    /// created.
+    pub unsafe fn uninit_of(dtype: Dtype) -> Self {
+        Self::new(InitValueInner::Uninit, dtype)
     }
-}
-impl std::fmt::Debug for NdarrayInitValue<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match &self.0 {
-            InitValueInner::Zero => "Zero",
-            InitValueInner::Nan => "Nan",
-            InitValueInner::Uninit => "Uninit",
-            InitValueInner::Value(v) => return f.debug_tuple("Value").field(v).finish(),
+
+    /// A specific value of type `T`.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and it will determine the created ndarray dtype.
+    pub fn value<T>(value: T) -> Self
+    where
+        T: Dtyped,
+    {
+        let value_bytes = unsafe {
+            std::slice::from_raw_parts(&value as *const T as *const u8, std::mem::size_of::<T>())
+        };
+        Self::value_bytes(value_bytes.to_vec(), T::dtype()).unwrap()
+    }
+
+    /// A specific value of the given dtype.
+    ///
+    /// The value must have the same size as specified by the dtype.
+    pub fn value_bytes(value: Vec<u8>, dtype: Dtype) -> Result<Self, Error> {
+        if value.len() != dtype.itemsize() {
+            crate::trace!(
+                "Value length {} does not match dtype itemsize {}",
+                value.len(),
+                dtype.itemsize()
+            );
+            return Err(Error::InvalidParam);
+        }
+        Ok(Self {
+            dtype,
+            value: InitValueInner::Value(value),
         })
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum InitValueInner<'a> {
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+enum InitValueInner {
     Zero,
     Nan,
     Uninit,
-    Value(&'a [u8]),
+    Value(Vec<u8>),
 }
 
 enum InitArgs<'a> {
-    Zeros,
-    Nans,
-    Uninit,
-    RepeatedValue(&'a [u8]),
-    CopyFromValuesBuf(&'a [u8]),
+    Zeros(Dtype, DimVec<i64>),
+    Nans(Dtype, DimVec<i64>),
+    Uninit(Dtype, DimVec<i64>),
+    RepeatedValue(Dtype, &'a [u8], DimVec<i64>),
+    CopyFromValuesBuf(Dtype, &'a [u8], DimVec<i64>),
     CopyFromNdarray(&'a Ndarray),
 }
 
@@ -605,7 +750,7 @@ impl Ndarray {
     /// The caller must ensure that the dtype of `T` matches the dtype of the ndarray. The size, alignment, and inner
     /// fields should all be compatible. See [`Dtyped`] for more information.
     #[cfg(feature = "ndarray")]
-    pub unsafe fn to_ndarray_without_dtype_check<T, D>(&self) -> Result<ndarray::Array<T, D>, Error>
+    unsafe fn to_ndarray_without_dtype_check<T, D>(&self) -> Result<ndarray::Array<T, D>, Error>
     where
         T: Copy + 'static,
         D: ndarray::Dimension,
@@ -618,7 +763,7 @@ impl Ndarray {
         let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
         unsafe { buf.set_len(buf_len) };
 
-        self.to_items_into(std::slice::from_raw_parts_mut(
+        self.to_items_bytes_into(std::slice::from_raw_parts_mut(
             buf.as_mut_ptr().cast(),
             buf_len * std::mem::size_of::<T>(),
         ))?;
@@ -632,17 +777,44 @@ impl Ndarray {
         Ok(ndarray::Array::from_shape_vec(res_shape, buf).unwrap())
     }
 
+    /// Get a vector with all the elements of the array.
+    ///
+    /// The returned array is of size `prod(shape)`, and the elements are laid out in memory according to the
+    /// standard strides.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and the function will succeed only if `T` matches the dtype
+    /// of the ndarray.
+    pub fn to_items<T>(&self) -> Result<Vec<T>, Error>
+    where
+        T: Dtyped,
+    {
+        self.check_dtype::<T>()?;
+        let buf_len = self.shape().iter().map(|s| *s as usize).product::<usize>();
+        let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
+        unsafe {
+            buf.set_len(buf_len);
+        }
+        self.to_items_bytes_into(unsafe {
+            std::slice::from_raw_parts_mut(
+                buf.as_mut_ptr().cast(),
+                buf_len * std::mem::size_of::<T>(),
+            )
+        })?;
+        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
+        Ok(buf)
+    }
+
     /// Get a bytes vector with all the elements of the array.
     ///
     /// The returned array is of size `itemsize * prod(shape)`, and the elements are laid out in memory according to the
     /// standard strides.
-    pub fn to_items(&self) -> Result<Vec<u8>, Error> {
+    pub fn to_items_bytes(&self) -> Result<Vec<u8>, Error> {
         let buf_len = self.typesize() * self.shape().iter().map(|s| *s as usize).product::<usize>();
         let mut buf = Vec::<MaybeUninit<u8>>::with_capacity(buf_len);
         unsafe {
             buf.set_len(buf_len);
         }
-        self.to_items_into(&mut buf)?;
+        self.to_items_bytes_into(&mut buf)?;
         let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(buf) };
         Ok(buf)
     }
@@ -651,12 +823,61 @@ impl Ndarray {
     ///
     /// The given buffer should have at least `itemsize * prod(shape)` bytes allocated, and the elements will be written
     /// according to the standard strides.
-    pub fn to_items_into(&self, buf: &mut [MaybeUninit<u8>]) -> Result<(), Error> {
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes written to the buffer.
+    pub fn to_items_bytes_into(&self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
         unsafe {
             blosc2_sys::b2nd_to_cbuffer(self.as_ptr(), buf.as_mut_ptr().cast(), buf.len() as i64)
                 .into_result()?;
         }
-        Ok(())
+        Ok(self.typesize() * self.shape().iter().map(|s| *s as usize).product::<usize>())
+    }
+
+    /// Get a single element from the array.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and the function will succeed only if `T` matches the dtype
+    /// of the ndarray.
+    pub fn get<T>(&self, idx: &[usize]) -> Result<T, Error>
+    where
+        T: Dtyped,
+    {
+        self.check_dtype::<T>()?;
+        let mut buf = MaybeUninit::<T>::uninit();
+        self.get_buf_into(idx, unsafe {
+            std::slice::from_raw_parts_mut(buf.as_mut_ptr().cast(), std::mem::size_of::<T>())
+        })?;
+        let buf = unsafe { buf.assume_init() };
+        Ok(buf)
+    }
+
+    /// Get a single element from the array as bytes vector.
+    pub fn get_buf(&self, idx: &[usize]) -> Result<Vec<u8>, Error> {
+        let buf_len = self.typesize();
+        let mut buf = Vec::<MaybeUninit<u8>>::with_capacity(buf_len);
+        unsafe { buf.set_len(buf_len) };
+        self.get_buf_into(idx, &mut buf)?;
+        let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(buf) };
+        Ok(buf)
+    }
+
+    /// Get a single element from the array and write it to the provided buffer.
+    pub fn get_buf_into(&self, idx: &[usize], dst: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
+        if idx.len() != self.ndim() {
+            crate::trace!(
+                "Index length {} must match array dimension {}",
+                idx.len(),
+                self.ndim()
+            );
+            return Err(Error::InvalidParam);
+        }
+
+        let slice = DimVec::from_slice_fn(idx, |&i| i..i + 1);
+        // Safety: checked idx.len()==self.ndim() , and we know self.ndim()<=MAX_DIM
+        let slice = unsafe { slice.unwrap_unchecked() };
+
+        self.slice_buf_into(slice.as_slice(), dst)
     }
 
     /// Get a slice of the array as an [`ndarray::Array`].
@@ -673,13 +894,13 @@ impl Ndarray {
     /// of the ndarray.
     ///
     /// ```rust
-    /// use blosc2::{Ndarray, NdarrayParams};
+    /// use blosc2::nd::{Ndarray, NdarrayParams};
     ///
     /// let arr = Ndarray::from_ndarray(
-    ///     &ndarray::array!([1, 2, 3], [4, 5, 6], [7, 8, 9]),
+    ///     &ndarray::array!([1_i32, 2, 3], [4, 5, 6], [7, 8, 9]),
     ///     NdarrayParams::default()
-    ///         .chunkshape(&[2, 2])
-    ///         .blockshape(&[1, 1]),
+    ///         .chunkshape(Some(&[2, 2]))
+    ///         .blockshape(Some(&[1, 1])),
     /// ).unwrap();
     /// let slice_arr: ndarray::Array2<i32> = arr.slice(&[0..2, 1..3]).unwrap();
     /// assert_eq!(slice_arr, ndarray::array![[2, 3], [5, 6]]);
@@ -713,7 +934,7 @@ impl Ndarray {
     /// The caller must ensure that the dtype of `T` matches the dtype of the ndarray. The size, alignment, and inner
     /// fields should all be compatible. See [`Dtyped`] for more information.
     #[cfg(feature = "ndarray")]
-    pub unsafe fn slice_without_dtype_check<T, D>(
+    unsafe fn slice_without_dtype_check<T, D>(
         &self,
         slice: &[std::ops::Range<usize>],
     ) -> Result<ndarray::Array<T, D>, Error>
@@ -751,7 +972,7 @@ impl Ndarray {
     ///
     /// * `slice` - a range per dimension, representing the portion of the array to extract.
     /// * `params` - The parameters to use for the new array. The chunkshape and blockshape are optional, overriding
-    ///   the original array's parameters, while the shape and dtype are ignored (taken from the original array).
+    ///   the original array's parameters.
     ///
     /// # Returns
     ///
@@ -798,10 +1019,10 @@ impl Ndarray {
 
         let ctx = Ctx::new(
             &storage,
-            shape.as_slice(), // ignore shape in params
+            shape.as_slice(),
             chunkshape,
             blockshape,
-            self.dtype_cstr(), // ignore dtype in params
+            self.dtype_cstr(),
             blosc2_sys::DTYPE_NUMPY_FORMAT as _,
         )?;
 
@@ -820,6 +1041,70 @@ impl Ndarray {
         unsafe { Self::from_raw_ptr(sliced.cast()) }
     }
 
+    /// Get a slice of the array as a contiguous buffer of items.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and the function will succeed only if `T` matches the dtype
+    /// of the ndarray.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - a range per dimension, representing the portion of the array to extract.
+    ///
+    /// # Returns
+    ///
+    /// A new vector containing the extracted items, of size `prod(slice_shape)`. The items are laid out in memory
+    /// according to the standard strides of the slice shape.
+    pub fn slice_items<T>(&self, slice: &[std::ops::Range<usize>]) -> Result<Vec<T>, Error>
+    where
+        T: Dtyped,
+    {
+        self.check_dtype::<T>()?;
+
+        let buf_len = slice.iter().map(|r| r.len()).product::<usize>();
+        let mut dst = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
+        unsafe { dst.set_len(buf_len) };
+        self.slice_buf_into(slice, unsafe {
+            std::slice::from_raw_parts_mut(
+                dst.as_mut_ptr().cast(),
+                buf_len * std::mem::size_of::<T>(),
+            )
+        })?;
+        let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(dst) };
+        Ok(vec)
+    }
+
+    /// Get a slice of the array as a contiguous buffer of items and copy it into the provided buffer.
+    ///
+    /// The type `T` must implement the [`Dtyped`] trait, and the function will succeed only if `T` matches the dtype
+    /// of the ndarray.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - a range per dimension, representing the portion of the array to extract.
+    /// * `buf` - the buffer to copy the extracted data into.
+    ///
+    /// # Returns
+    ///
+    /// The number of items written to the buffer.
+    ///
+    /// The given buffer should have at least `prod(slice_shape)` elements allocated, and the elements will be
+    /// written according to the standard strides of the slice shape.
+    pub fn slice_items_into<T>(
+        &self,
+        slice: &[std::ops::Range<usize>],
+        dst: &mut [MaybeUninit<T>],
+    ) -> Result<usize, Error>
+    where
+        T: Dtyped,
+    {
+        self.check_dtype::<T>()?;
+
+        self.slice_buf_into(slice, unsafe {
+            std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast(), std::mem::size_of_val(dst))
+        })?;
+        Ok(slice.iter().map(|r| r.len()).product::<usize>())
+    }
+
     /// Get a slice of the array as a contiguous buffer of items as bytes.
     ///
     /// # Arguments
@@ -829,11 +1114,12 @@ impl Ndarray {
     /// # Returns
     ///
     /// A contiguous buffer of bytes representing the extracted portion of the array. The length of the returned buffer
-    /// will be `itemsize * prod(slice_shape)`.
+    /// will be `itemsize * prod(slice_shape)`. The items are laid out in memory according to the standard strides of
+    /// the slice shape.
     pub fn slice_buf(&self, slice: &[std::ops::Range<usize>]) -> Result<Vec<u8>, Error> {
-        let len = slice.iter().map(|r| r.len()).product::<usize>();
-        let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(len);
-        unsafe { dst.set_len(len) };
+        let buf_len = self.typesize() * slice.iter().map(|r| r.len()).product::<usize>();
+        let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(buf_len);
+        unsafe { dst.set_len(buf_len) };
         self.slice_buf_into(slice, &mut dst)?;
         let vec = unsafe { std::mem::transmute::<Vec<MaybeUninit<u8>>, Vec<u8>>(dst) };
         Ok(vec)
@@ -845,11 +1131,19 @@ impl Ndarray {
     ///
     /// * `slice` - a range per dimension, representing the portion of the array to extract.
     /// * `buf` - the buffer to copy the extracted data into.
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes written to the buffer.
+    ///
+    /// The given buffer should have at least `itemsize * prod(slice_shape)` bytes allocated, and the elements will be
+    /// written according to the standard strides. The items are laid out in memory according to the standard strides of
+    /// the slice shape.
     pub fn slice_buf_into(
         &self,
         slice: &[std::ops::Range<usize>],
         buf: &mut [MaybeUninit<u8>],
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         self.check_slice_arg(slice)?;
         let shape = DimVec::from_slice_fn(slice, |r| r.len());
         // Safety: checked slice.len()==self.ndim() in check_slice_arg, and we know self.ndim()<=MAX_DIM
@@ -862,7 +1156,7 @@ impl Ndarray {
         slice: &[std::ops::Range<usize>],
         buf: &mut [MaybeUninit<u8>],
         buf_shape: &[usize],
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         self.check_slice_arg(slice)?;
         if buf_shape.len() != self.ndim() {
             crate::trace!(
@@ -893,7 +1187,12 @@ impl Ndarray {
             )
             .into_result()?;
         }
-        Ok(())
+        Ok(self.typesize()
+            * buf_shape
+                .as_slice()
+                .iter()
+                .map(|s| *s as usize)
+                .product::<usize>())
     }
 
     /// Set all elements in a slice of the array, copying from the provided [`ndarray::ArrayBase`].
@@ -936,7 +1235,7 @@ impl Ndarray {
     /// The caller must ensure that the dtype of `T` matches the dtype of the ndarray. The size, alignment, and inner
     /// fields should all be compatible. See [`Dtyped`] for more information.
     #[cfg(feature = "ndarray")]
-    pub unsafe fn set_slice_without_dtype_check<S, T, D>(
+    unsafe fn set_slice_without_dtype_check<S, T, D>(
         &mut self,
         slice: &[std::ops::Range<usize>],
         data: &ndarray::ArrayBase<S, D>,
@@ -972,11 +1271,38 @@ impl Ndarray {
 
     /// Set all elements in a slice of the array, copying from the provided contiguous buffer of items.
     ///
+    /// The type `T` must implement the [`Dtyped`] trait, and the function will succeed only if `T` matches the dtype
+    /// of the ndarray.
+    ///
+    /// # Arguments
+    ///
+    /// * `slice` - a range per dimension, representing the portion of the array to modify.
+    /// * `items` - the source data to copy from, as a contiguous buffer of `T` elements.
+    ///   The length of `items` must be equal to `prod(slice_shape)` and the elements should be laid out according to
+    ///   the standard strides of the slice shape.
+    pub fn set_slice_items<T>(
+        &mut self,
+        slice: &[std::ops::Range<usize>],
+        items: &[T],
+    ) -> Result<(), Error>
+    where
+        T: Dtyped,
+    {
+        self.check_slice_arg(slice)?;
+
+        self.set_slice_buf(slice, unsafe {
+            std::slice::from_raw_parts(items.as_ptr().cast(), std::mem::size_of_val(items))
+        })
+    }
+
+    /// Set all elements in a slice of the array, copying from the provided contiguous buffer of items bytes.
+    ///
     /// # Arguments
     ///
     /// * `slice` - a range per dimension, representing the portion of the array to modify.
     /// * `items` - the source data to copy from, as a contiguous buffer of bytes. The length of `items` must be equal
-    ///   to `itemsize * prod(slice_shape)` and the elements should be laid out according to the standard strides.
+    ///   to `itemsize * prod(slice_shape)` and the elements should be laid out according to the standard strides
+    ///   of the slice shape.
     pub fn set_slice_buf(
         &mut self,
         slice: &[std::ops::Range<usize>],
@@ -1111,7 +1437,7 @@ impl Ndarray {
     /// # Arguments
     ///
     /// * `params` - The parameters to use for the new array. The chunkshape and blockshape are optional, overriding
-    ///   the original array's parameters, while the shape and dtype are ignored (taken from the original array).
+    ///   the original array's parameters.
     pub fn copy(&self, params: &NdarrayParams) -> Result<Self, Error> {
         self.copy_to(SChunkStorageParams::in_memory(), params)
     }
@@ -1123,13 +1449,13 @@ impl Ndarray {
     ///
     /// * `storage` - The storage parameters to use for the new array.
     /// * `params` - The parameters to use for the new array. The chunkshape and blockshape are optional, overriding
-    ///   the original array's parameters, while the shape and dtype are ignored (taken from the original array).
+    ///   the original array's parameters.
     pub fn copy_to(
         &self,
         storage: SChunkStorageParams,
         params: &NdarrayParams,
     ) -> Result<Self, Error> {
-        Self::new_impl(&InitArgs::CopyFromNdarray(self), storage, params)
+        Self::new_impl(InitArgs::CopyFromNdarray(self), storage, params)
     }
 
     #[allow(unused)]
@@ -1156,18 +1482,19 @@ impl Drop for Ndarray {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::mem::MaybeUninit;
     use std::path::PathBuf;
 
     use rand::distr::weighted::WeightedIndex;
     use rand::prelude::*;
 
     use super::{Ndarray, NdarrayInitValue, NdarrayParams};
-    use crate::ndarray::InitValueInner;
-    use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
-    use crate::{
-        f16, Complex, Dtype, DtypeKind, DtypeScalarKind, MmapMode, SChunkOpenOptions,
-        SChunkStorageParams, MAX_DIM,
+    use crate::nd::InitValueInner;
+    use crate::nd::{
+        Dtype, DtypeKind, DtypeScalarKind, SChunkOpenOptions, SChunkStorageParams, MAX_DIM,
     };
+    use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
+    use crate::util::{f16, Complex, MmapMode};
 
     #[cfg(feature = "ndarray")]
     use super::Dtyped;
@@ -1179,8 +1506,8 @@ mod tests {
         let b2nd = Ndarray::from_ndarray(
             &array1,
             NdarrayParams::default()
-                .blockshape(&[1, 1, 1])
-                .chunkshape(&[1, 1, 1]),
+                .blockshape(Some(&[1, 1, 1]))
+                .chunkshape(Some(&[1, 1, 1])),
         )
         .unwrap();
 
@@ -1198,7 +1525,9 @@ mod tests {
             let (shape, dtype, params) = rand_params(&mut rand);
             let data = rand_data(&dtype, &shape, &mut rand);
             let storage = rand_storage(&mut rand);
-            let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+            let array =
+                Ndarray::from_items_bytes_at(&data, dtype, &shape, storage.params(), &params)
+                    .unwrap();
 
             assert_eq!(
                 shape,
@@ -1208,7 +1537,7 @@ mod tests {
                     .map(|s| *s as usize)
                     .collect::<Vec<_>>()
             );
-            let array_data = array.to_items().unwrap();
+            let array_data = array.to_items_bytes().unwrap();
             assert_eq!(data, array_data);
         }
     }
@@ -1225,13 +1554,13 @@ mod tests {
                 .collect::<Vec<_>>();
             let value = {
                 let values = [
-                    NdarrayInitValue::zero(),
-                    unsafe { NdarrayInitValue::uninit() },
-                    NdarrayInitValue::value(&value),
+                    NdarrayInitValue::zero_of(dtype.clone()),
+                    unsafe { NdarrayInitValue::uninit_of(dtype.clone()) },
+                    NdarrayInitValue::value_bytes(value, dtype.clone()).unwrap(),
                 ];
                 values.choose(&mut rand).unwrap().clone()
             };
-            let array = Ndarray::new_at(&value, storage.params(), &params).unwrap();
+            let array = Ndarray::new_at(value.clone(), &shape, storage.params(), &params).unwrap();
 
             assert_eq!(
                 shape,
@@ -1241,12 +1570,12 @@ mod tests {
                     .map(|s| *s as usize)
                     .collect::<Vec<_>>()
             );
-            let array_data = array.to_items().unwrap();
+            let array_data = array.to_items_bytes().unwrap();
             assert_eq!(
                 array_data.len(),
                 dtype.itemsize() * shape.iter().product::<usize>()
             );
-            match value.0 {
+            match value.value {
                 InitValueInner::Zero => assert!(array_data.iter().all(|&b| b == 0)),
                 InitValueInner::Uninit => {}
                 InitValueInner::Value(items) => assert!(array_data
@@ -1259,12 +1588,70 @@ mod tests {
 
     #[test]
     fn new_from_items() {
+        fn test_impl<T>(repeat: usize, rand: &mut impl Rng)
+        where
+            T: Dtyped + PartialEq + std::fmt::Debug,
+        {
+            for _ in 0..repeat {
+                let dtype = T::dtype();
+                let (shape, params) = rand_params_with_dtype(&dtype, rand);
+                let items = rand_data_typed::<T>(&shape, rand);
+                let array = Ndarray::from_items(&items, &shape, &params).unwrap();
+
+                assert_eq!(
+                    shape,
+                    array
+                        .shape()
+                        .iter()
+                        .map(|s| *s as usize)
+                        .collect::<Vec<_>>()
+                );
+                let items_new = array.to_items::<T>().unwrap();
+                assert_eq!(items, items_new);
+            }
+        }
+
+        let mut rand = StdRng::seed_from_u64(0xa3eae3352da3f602);
+        for i in 0..=17 {
+            match i {
+                0 => test_impl::<i8>(1, &mut rand),
+                2 => test_impl::<i16>(1, &mut rand),
+                4 => test_impl::<i32>(8, &mut rand),
+                6 => test_impl::<i64>(8, &mut rand),
+                1 => test_impl::<u8>(1, &mut rand),
+                3 => test_impl::<u16>(1, &mut rand),
+                5 => test_impl::<u32>(1, &mut rand),
+                7 => test_impl::<u64>(1, &mut rand),
+                8 => {
+                    cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                        // need the half crate to implement PartialEq for f16
+                        test_impl::<f16>(1, &mut rand);
+                    } }
+                }
+                9 => test_impl::<f32>(8, &mut rand),
+                10 => test_impl::<f64>(8, &mut rand),
+                11 => test_impl::<Complex<f32>>(2, &mut rand),
+                12 => test_impl::<Complex<f64>>(2, &mut rand),
+                13 => test_impl::<bool>(1, &mut rand),
+                14 => test_impl::<Point>(3, &mut rand),
+                15 => test_impl::<Person>(2, &mut rand),
+                16 => test_impl::<PersonAligned>(2, &mut rand),
+                17 => test_impl::<AudioSample>(2, &mut rand),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn new_from_items_bytes() {
         let mut rand = StdRng::seed_from_u64(0x5ac98edb0400b82f);
         for _ in 0..30 {
             let (shape, dtype, params) = rand_params(&mut rand);
             let storage = rand_storage(&mut rand);
             let data = rand_data(&dtype, &shape, &mut rand);
-            let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+            let array =
+                Ndarray::from_items_bytes_at(&data, dtype, &shape, storage.params(), &params)
+                    .unwrap();
 
             assert_eq!(
                 shape,
@@ -1274,7 +1661,7 @@ mod tests {
                     .map(|s| *s as usize)
                     .collect::<Vec<_>>()
             );
-            let array_data = array.to_items().unwrap();
+            let array_data = array.to_items_bytes().unwrap();
             assert_eq!(data, array_data);
         }
     }
@@ -1355,8 +1742,10 @@ mod tests {
             });
             let contiguous = rand.random::<bool>();
             {
-                let array = Ndarray::from_items_buf_at(
+                let array = Ndarray::from_items_bytes_at(
                     &data,
+                    dtype,
+                    &shape,
                     SChunkStorageParams {
                         contiguous,
                         urlpath: None,
@@ -1391,7 +1780,7 @@ mod tests {
                     .map(|s| *s as usize)
                     .collect::<Vec<_>>()
             );
-            let array_data = array.to_items().unwrap();
+            let array_data = array.to_items_bytes().unwrap();
             assert_eq!(data, array_data);
         }
     }
@@ -1403,13 +1792,15 @@ mod tests {
             let (shape, dtype, params) = rand_params(&mut rand);
             let storage = rand_storage(&mut rand);
             let data = rand_data(&dtype, &shape, &mut rand);
-            let array1 = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+            let array1 =
+                Ndarray::from_items_bytes_at(&data, dtype, &shape, storage.params(), &params)
+                    .unwrap();
 
             let mut params2 = NdarrayParams::default();
             if rand.random::<bool>() {
                 let (chunkshape2, blockshape2) = rand_chunk_block_shapes(&shape, &mut rand);
-                params2.chunkshape(&chunkshape2);
-                params2.blockshape(&blockshape2);
+                params2.chunkshape(Some(&chunkshape2));
+                params2.blockshape(Some(&blockshape2));
             };
 
             let storage2 = rand_storage(&mut rand);
@@ -1417,7 +1808,70 @@ mod tests {
 
             assert_eq!(array1.shape(), array2.shape());
             assert_eq!(array1.dtype(), array2.dtype());
-            assert_eq!(array1.to_items().unwrap(), array2.to_items().unwrap());
+            assert_eq!(
+                array1.to_items_bytes().unwrap(),
+                array2.to_items_bytes().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn get() {
+        fn test_impl<T>(repeat: usize, rand: &mut impl Rng)
+        where
+            T: Dtyped + PartialEq + std::fmt::Debug,
+        {
+            for _ in 0..repeat {
+                let dtype = T::dtype();
+                let (shape, params) = rand_params_with_dtype(&dtype, rand);
+                let storage = rand_storage(rand);
+                let array_orig = rand_ndarray::<T>(&shape, rand);
+                let array =
+                    Ndarray::from_ndarray_at(&array_orig, storage.params(), &params).unwrap();
+
+                for _ in 0..30 {
+                    let idx = shape
+                        .iter()
+                        .map(|&s| rand.random_range(0..s))
+                        .collect::<Vec<_>>();
+                    let item = array.get::<T>(&idx).unwrap();
+                    assert_arr_eq_nan!(
+                        // we use the array_eq to compare nans properly
+                        &ndarray::array![item],
+                        &ndarray::array![array_orig[idx.as_slice()]]
+                    );
+                }
+            }
+        }
+
+        let mut rand = StdRng::seed_from_u64(0xc885561584f1500c);
+        for i in 0..=17 {
+            match i {
+                0 => test_impl::<i8>(1, &mut rand),
+                2 => test_impl::<i16>(1, &mut rand),
+                4 => test_impl::<i32>(8, &mut rand),
+                6 => test_impl::<i64>(8, &mut rand),
+                1 => test_impl::<u8>(1, &mut rand),
+                3 => test_impl::<u16>(1, &mut rand),
+                5 => test_impl::<u32>(1, &mut rand),
+                7 => test_impl::<u64>(1, &mut rand),
+                8 => {
+                    cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                        // need the half crate to implement PartialEq for f16
+                        test_impl::<f16>(1, &mut rand);
+                    } }
+                }
+                9 => test_impl::<f32>(8, &mut rand),
+                10 => test_impl::<f64>(8, &mut rand),
+                11 => test_impl::<Complex<f32>>(2, &mut rand),
+                12 => test_impl::<Complex<f64>>(2, &mut rand),
+                13 => test_impl::<bool>(1, &mut rand),
+                14 => test_impl::<Point>(3, &mut rand),
+                15 => test_impl::<Person>(2, &mut rand),
+                16 => test_impl::<PersonAligned>(2, &mut rand),
+                17 => test_impl::<AudioSample>(2, &mut rand),
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -1495,6 +1949,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn slice_items() {
+        fn test_impl<T>(repeat: usize, rand: &mut impl Rng)
+        where
+            T: Dtyped + PartialEq + std::fmt::Debug,
+        {
+            for _ in 0..repeat {
+                let dtype = T::dtype();
+                let (shape, params) = rand_params_with_dtype(&dtype, rand);
+                let storage = rand_storage(rand);
+                let array_orig = rand_ndarray::<T>(&shape, rand);
+                let array =
+                    Ndarray::from_ndarray_at(&array_orig, storage.params(), &params).unwrap();
+
+                for _ in 0..10 {
+                    let slice = shape
+                        .iter()
+                        .map(|&s| {
+                            let begin = rand.random_range(0..=s);
+                            let end = rand.random_range(begin..=s);
+                            begin..end
+                        })
+                        .collect::<Vec<_>>();
+                    let slice_data = array.slice_items::<T>(&slice).unwrap();
+                    let slice_data = ndarray::ArrayD::from_shape_vec(
+                        slice.iter().map(|r| r.len()).collect::<Vec<_>>(),
+                        slice_data,
+                    )
+                    .unwrap();
+
+                    let slice_data_expected = ndarray::ArrayD::from_shape_fn(
+                        slice.iter().map(|r| r.len()).collect::<Vec<_>>(),
+                        |indices| {
+                            let index = slice
+                                .iter()
+                                .enumerate()
+                                .map(|(i, r)| r.start + indices[i])
+                                .collect::<Vec<_>>();
+                            array_orig[index.as_slice()]
+                        },
+                    );
+                    assert_eq!(slice_data_expected.shape(), slice_data.shape());
+                    assert_arr_eq_nan!(&slice_data_expected, &slice_data);
+                }
+            }
+        }
+
+        let mut rand = StdRng::seed_from_u64(0x63820ee4a404a912);
+        for i in 0..=17 {
+            match i {
+                0 => test_impl::<i8>(1, &mut rand),
+                2 => test_impl::<i16>(1, &mut rand),
+                4 => test_impl::<i32>(8, &mut rand),
+                6 => test_impl::<i64>(8, &mut rand),
+                1 => test_impl::<u8>(1, &mut rand),
+                3 => test_impl::<u16>(1, &mut rand),
+                5 => test_impl::<u32>(1, &mut rand),
+                7 => test_impl::<u64>(1, &mut rand),
+                8 => {
+                    cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                        // need the half crate to implement PartialEq for f16
+                        test_impl::<f16>(1, &mut rand);
+                    } }
+                }
+                9 => test_impl::<f32>(8, &mut rand),
+                10 => test_impl::<f64>(8, &mut rand),
+                11 => test_impl::<Complex<f32>>(2, &mut rand),
+                12 => test_impl::<Complex<f64>>(2, &mut rand),
+                13 => test_impl::<bool>(1, &mut rand),
+                14 => test_impl::<Point>(3, &mut rand),
+                15 => test_impl::<Person>(2, &mut rand),
+                16 => test_impl::<PersonAligned>(2, &mut rand),
+                17 => test_impl::<AudioSample>(2, &mut rand),
+                _ => unreachable!(),
+            }
+        }
+    }
+
     fn default_strides(shape: &[usize], itemsize: usize) -> Vec<isize> {
         let mut strides = shape
             .iter()
@@ -1524,7 +2056,14 @@ mod tests {
             let (shape, dtype, params) = rand_params(&mut rand);
             let storage = rand_storage(&mut rand);
             let data = rand_data(&dtype, &shape, &mut rand);
-            let array = Ndarray::from_items_buf_at(&data, storage.params(), &params).unwrap();
+            let array = Ndarray::from_items_bytes_at(
+                &data,
+                dtype.clone(),
+                &shape,
+                storage.params(),
+                &params,
+            )
+            .unwrap();
             let orig_strides = default_strides(&shape, dtype.itemsize());
 
             for _ in 0..10 {
@@ -1539,8 +2078,8 @@ mod tests {
                 let mut slice_params = NdarrayParams::default();
                 if rand.random::<bool>() {
                     let (chunkshape2, blockshape2) = rand_chunk_block_shapes(&shape, &mut rand);
-                    slice_params.chunkshape(&chunkshape2);
-                    slice_params.blockshape(&blockshape2);
+                    slice_params.chunkshape(Some(&chunkshape2));
+                    slice_params.blockshape(Some(&blockshape2));
                 };
                 let slice_ndarray = array.slice_blosc(&slice, &slice_params).unwrap();
 
@@ -1555,7 +2094,7 @@ mod tests {
                 );
                 assert_eq!(slice_ndarray.typesize(), dtype.itemsize());
                 let slice_strides = default_strides(&slice_shape, dtype.itemsize());
-                let slice_data_buf = slice_ndarray.to_items().unwrap();
+                let slice_data_buf = slice_ndarray.to_items_bytes().unwrap();
 
                 let mut iter = ArrayIter::new(&slice_shape, &slice_strides);
                 while let Some((index, _)) = iter.next() {
@@ -1591,11 +2130,8 @@ mod tests {
         params
             .cparams(rand_cparams(rand))
             .dparams(rand_dparams(rand))
-            .shape(shape.as_slice())
-            .chunkshape(&chunkshape)
-            .blockshape(&blockshape)
-            .dtype(dtype.clone())
-            .unwrap();
+            .chunkshape(Some(&chunkshape))
+            .blockshape(Some(&blockshape));
         (shape, params)
     }
 
@@ -1682,6 +2218,25 @@ mod tests {
                 return dtype;
             }
         }
+    }
+
+    fn rand_data_typed<T>(shape: &[usize], rand: &mut impl Rng) -> Vec<T>
+    where
+        T: Dtyped,
+    {
+        rand_data(&T::dtype(), shape, rand)
+            .chunks_exact(std::mem::size_of::<T>())
+            .map(|chunk| {
+                let mut value = MaybeUninit::<T>::uninit();
+                unsafe {
+                    value
+                        .as_mut_ptr()
+                        .cast::<u8>()
+                        .copy_from_nonoverlapping(chunk.as_ptr(), std::mem::size_of::<T>())
+                };
+                unsafe { value.assume_init() }
+            })
+            .collect()
     }
 
     fn rand_data(dtype: &Dtype, shape: &[usize], rand: &mut impl Rng) -> Vec<u8> {
@@ -2144,8 +2699,8 @@ mod tests {
 
         use rand::prelude::*;
 
-        use crate::ndarray::tests::array_equal_impl;
-        use crate::{Dtype, DtypeScalarKind, Dtyped};
+        use crate::nd::tests::array_equal_impl;
+        use crate::nd::{Dtype, DtypeScalarKind, Dtyped};
 
         pub(crate) fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
         where
@@ -2173,10 +2728,10 @@ mod tests {
 
         macro_rules! assert_arr_eq_nan {
             ($left:expr, $right:expr $(,)?) => {{
-                assert!(crate::ndarray::tests::ndarray_eq_nan($left, $right), )
+                assert!(crate::nd::tests::ndarray_eq_nan($left, $right), )
             }};
             ($left:expr, $right:expr, $($arg:tt)*) => {{
-                assert!(crate::ndarray::tests::ndarray_eq_nan($left, $right), $($arg)+)
+                assert!(crate::nd::tests::ndarray_eq_nan($left, $right), $($arg)+)
             }};
         }
         pub(crate) use assert_arr_eq_nan;

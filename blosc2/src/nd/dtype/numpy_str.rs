@@ -1,8 +1,8 @@
 use std::{borrow::Cow, collections::HashMap, fmt::Write, num::ParseIntError};
 
-use crate::ndarray::dtype::ast::{parse_ast, Node};
-use crate::ndarray::dtype::ceil_to_multiple;
-use crate::{Dtype, DtypeError, DtypeKind, DtypeScalarKind, Endianness};
+use crate::nd::dtype::ast::{parse_ast, Node};
+use crate::nd::dtype::ceil_to_multiple;
+use crate::nd::{Dtype, DtypeError, DtypeKind, DtypeScalarKind, Endianness};
 
 pub(crate) fn parse_numpy_dtype_str(s: &str) -> Result<Dtype, DtypeParseError> {
     let mut chars = s.chars();
@@ -311,7 +311,7 @@ pub struct DtypeParseError {
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DtypeParseErrorKind {
-    AstError(crate::ndarray::dtype::ast::ParseError), // { msg: &'static str, pos: usize },
+    AstError(crate::nd::dtype::ast::ParseError), // { msg: &'static str, pos: usize },
     ParseIntError(ParseIntError),
     UnsupportedScalar,
     ExpectedLiteral,
@@ -562,7 +562,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use crate::{Dtype, DtypeKind, DtypeScalarKind};
+    use crate::nd::{Dtype, DtypeKind, DtypeScalarKind};
 
     #[test]
     fn dtype_from_str() {
