@@ -6,13 +6,20 @@ fn main() {
     // Build and link
     let lib_name = build_c_lib();
     println!("cargo::rustc-link-lib=static={lib_name}");
+
+    build_c_lib_extension();
 }
 
 fn generate_bindings() {
+    let c_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("c");
+    println!("cargo::rerun-if-changed={}", c_dir.display());
+
     let builder = bindgen::Builder::default()
         .use_core()
         .header("c/bindings.h")
         .allowlist_file(".*blosc2.h")
+        .allowlist_file(".*b2nd.h")
+        .allowlist_file(".*blosc2_rs.h")
         .allowlist_recursively(false)
         .default_enum_style(bindgen::EnumVariation::Consts)
         .generate_cstr(true)
@@ -75,6 +82,16 @@ fn build_c_lib() -> String {
         lib_dir.to_str().unwrap()
     );
     libname.to_string()
+}
+
+fn build_c_lib_extension() {
+    let sources_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("c");
+    println!("cargo::rerun-if-changed={}", sources_dir.display());
+
+    cc::Build::new()
+        .file(sources_dir.join("blosc2_rs.c"))
+        .include(sources_dir)
+        .compile(&format!("blosc2_rs_c_ext_{}", env!("CARGO_PKG_VERSION")));
 }
 
 fn copy_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {

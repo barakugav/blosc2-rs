@@ -1,4 +1,9 @@
 //! Utility functions and types.
+//!
+//! This module define the [`f16`] and [`Complex`] types. If the `half` or `num-complex` features are enabled,
+//! the corresponding types are re-exported from the `half` and `num-complex` crates respectively. Otherwise,
+//! simple structs are defined, providing a minimal implementation with conversions from/to bits, without any
+//! arithmetic operations.
 
 use std::ffi::CString;
 use std::mem::{ManuallyDrop, MaybeUninit};
@@ -136,6 +141,12 @@ impl<T> AsRef<[T]> for CowVec<'_, T> {
         self.as_slice()
     }
 }
+impl<T> std::ops::Deref for CowVec<'_, T> {
+    type Target = [T];
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
 
 impl Clone for CowVec<'_, u8> {
     fn clone(&self) -> Self {
@@ -198,16 +209,134 @@ pub(crate) fn path2cstr(path: &Path) -> CString {
         .expect("failed to convert path to cstr")
 }
 
+pub(crate) struct ArrayVec<T, const N: usize> {
+    data: [MaybeUninit<T>; N],
+    len: usize,
+}
+impl<T, const N: usize> ArrayVec<T, N> {
+    fn new() -> Self {
+        Self {
+            data: unsafe { MaybeUninit::uninit().assume_init() },
+            len: 0,
+        }
+    }
+    #[allow(unused)]
+    pub(crate) fn from_slice(slice: &[T]) -> Option<Self>
+    where
+        T: Copy,
+    {
+        Self::from_slice_fn(slice, |item| *item)
+    }
+    pub(crate) fn from_slice_fn<U>(slice: &[U], f: impl Fn(&U) -> T) -> Option<Self> {
+        if slice.len() > N {
+            return None;
+        }
+        let mut arr = Self::new();
+        for (i, item) in slice.iter().enumerate() {
+            arr.data[i].write(f(item));
+        }
+        arr.len = slice.len();
+        Some(arr)
+    }
+    pub(crate) fn as_slice(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr() as *const T, self.len) }
+    }
+}
+impl<T, const N: usize> Drop for ArrayVec<T, N> {
+    fn drop(&mut self) {
+        for i in 0..self.len {
+            unsafe {
+                self.data[i].assume_init_drop();
+            }
+        }
+    }
+}
+impl<T, const N: usize> Clone for ArrayVec<T, N>
+where
+    T: Copy,
+{
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data,
+            len: self.len,
+        }
+    }
+}
+impl<T, const N: usize> std::fmt::Debug for ArrayVec<T, N>
+where
+    T: std::fmt::Debug + Copy,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.as_slice(), f)
+    }
+}
+
+/// Memory-mapped mode for opening a super chunk.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[non_exhaustive]
+pub enum MmapMode {
+    /// Open existing file for reading only.
+    Read,
+    /// Open existing file for reading and writing.
+    ReadWrite,
+    // /// Create or overwrite existing file for reading and writing.
+    // WriteOverride,
+    /// Copy-on-write: assignments affect data in memory, but changes are not saved to disk. The file on disk is read-only.
+    Cow,
+}
+
+cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+    pub use half::f16;
+} else {
+        /// A 16-bit floating point type implementing the IEEE 754-2008 standard [`binary16`] a.k.a "half"
+        /// format.
+        ///
+        /// Doesn't provide any arithmetic operations, but can be converted to/from `u16`.
+        /// Enable the `half` feature to get a fully functional `f16` type.
+        #[derive(Copy, Clone, Debug, Default)]
+        #[repr(transparent)]
+        #[allow(non_camel_case_types)]
+        pub struct f16(u16);
+        impl f16 {
+            #[doc = concat!("Creates a new `f16` from its raw bit representation.")]
+            pub const fn from_bits(bits: u16) -> Self {
+                Self(bits)
+            }
+            #[doc = concat!("Get the raw bit representation of the `f16`.")]
+            pub const fn to_bits(&self) -> u16 {
+                self.0
+            }
+        }
+} }
+
+cfg_if::cfg_if! { if #[cfg(feature = "num-complex")] {
+    pub use num_complex::Complex;
+} else {
+    /// A complex number in Cartesian form.
+    ///
+    /// Doesn't provide any arithmetic operations, but expose the real and imaginary parts.
+    /// Enable the `num-complex` feature to get a fully functional `Complex` type.
+    ///
+    /// `Complex<T>` is memory layout compatible with an array `[T; 2]`, which is compatible with
+    /// libc, numpy, etc.
+    #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+    #[repr(C)]
+    pub struct Complex<T> {
+        /// Real portion of the complex number
+        pub re: T,
+        /// Imaginary portion of the complex number
+        pub im: T,
+    }
+} }
+
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::num::NonZeroUsize;
-
     use rand::distr::weighted::WeightedIndex;
     use rand::prelude::*;
 
     use crate::{CParams, CompressAlgo, DParams, Filter, SplitMode};
 
-    pub(crate) fn rand_src_len(typesize: usize, rand: &mut StdRng) -> usize {
+    pub(crate) fn rand_src_len(typesize: usize, rand: &mut impl Rng) -> usize {
         if typesize == 0 {
             return 0;
         }
@@ -228,11 +357,11 @@ pub(crate) mod tests {
         ceil_to_multiple(len, typesize)
     }
 
-    pub(crate) fn rand_cparams(rand: &mut StdRng) -> CParams {
+    pub(crate) fn rand_cparams(rand: &mut impl Rng) -> CParams {
         rand_cparams2(false, rand)
     }
 
-    pub(crate) fn rand_cparams2(lossy: bool, rand: &mut StdRng) -> CParams {
+    pub(crate) fn rand_cparams2(lossy: bool, rand: &mut impl Rng) -> CParams {
         let mut params = CParams::default();
 
         let compressors = [
@@ -262,7 +391,7 @@ pub(crate) mod tests {
             Some(rand.random_range(1..=64)),
         ];
         if let Some(typesize) = typesizes.choose(rand).unwrap() {
-            params.typesize(NonZeroUsize::new(*typesize).unwrap());
+            params.typesize(*typesize).unwrap();
         }
 
         let nthreads = [None, Some(rand.random_range(0..=64))];
@@ -304,12 +433,12 @@ pub(crate) mod tests {
             .iter()
             .map(|f| Some(vec![f.clone()]))
             .chain([None, Some(Vec::new()), {
-                let max_filter_num = 2; // TODO: should be 6
+                let (min_filter_num, max_filter_num) = (1, 1); // TODO: should be 6
                 let mut basic_filters = basic_filters.clone();
                 basic_filters.shuffle(rand);
                 let filters = basic_filters
                     .into_iter()
-                    .take(rand.random_range(2..=max_filter_num))
+                    .take(rand.random_range(min_filter_num..=max_filter_num))
                     .collect();
                 Some(filters)
             }])
@@ -321,7 +450,7 @@ pub(crate) mod tests {
         params
     }
 
-    pub(crate) fn rand_dparams(rand: &mut StdRng) -> DParams {
+    pub(crate) fn rand_dparams(rand: &mut impl Rng) -> DParams {
         let mut params = DParams::default();
 
         let nthreads = [None, Some(rand.random_range(0..=2))];

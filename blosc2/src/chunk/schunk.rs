@@ -2,56 +2,104 @@ use std::mem::MaybeUninit;
 use std::path::Path;
 use std::ptr::NonNull;
 
+use crate::chunk::Chunk;
 use crate::error::ErrorCode;
-use crate::util::{path2cstr, BytesMaybePassOwnershipToC, CowVec};
-use crate::{CParams, Chunk, DParams, Error};
+use crate::util::{path2cstr, BytesMaybePassOwnershipToC, CowVec, MmapMode};
+use crate::{CParams, DParams, Error};
 
 /// A super chunk (SChunk) is a collection of compressed chunks that are treated as a single entity.
 ///
 /// It can be stored in memory or on disk, and support inserting, updating, deleting and appending
-/// chunks or data to it. It support random access to either chunks or items in the chunks.
+/// chunks or data to it. It support random access to either chunks or items in the chunks, by
+/// decompressing only the relevant chunks or items.
+///
+/// ```rust
+/// use blosc2::{CParams, DParams};
+/// use blosc2::chunk::{SChunk, Encoder};
+///
+/// let i32len = std::mem::size_of::<i32>();
+/// let cparams = CParams::default()
+///     .typesize(i32len)
+///     .unwrap()
+///     .clone();
+/// let mut schunk = SChunk::new(cparams.clone(), DParams::default()).unwrap();
+///
+/// // Create two data arrays
+/// let data1: [i32; 7] = [1, 2, 3, 4, 5, 6, 7];
+/// let data2: [i32; 7] = [8, 9, 10, 11, 12, 13, 14];
+/// let data1_bytes =
+///     unsafe { std::slice::from_raw_parts(data1.as_ptr() as *const u8, data1.len() * i32len) };
+/// let data2_bytes =
+///     unsafe { std::slice::from_raw_parts(data2.as_ptr() as *const u8, data2.len() * i32len) };
+///
+/// // Append the first data array to the SChunk, which will be compressed using SChunk's CParams
+/// schunk.append(data1_bytes).unwrap();
+/// assert_eq!(schunk.num_chunks(), 1);
+/// assert_eq!(7, schunk.items_num());
+///
+/// // Append the second data array to the SChunk, as already compressed data
+/// let data2_cparams = CParams::default()
+///     .typesize(i32len) // typesize must match the SChunk's CParams
+///     .unwrap()
+///     .clevel(9)
+///     .clone();
+/// let data2_chunk = Encoder::new(data2_cparams)
+///     .unwrap()
+///     .compress(data2_bytes)
+///     .unwrap();
+/// schunk.append_chunk(data2_chunk.shallow_clone()).unwrap();
+/// assert_eq!(schunk.num_chunks(), 2);
+/// assert_eq!(14, schunk.items_num());
+///
+/// // Random access a whole chunk within the super-chunk
+/// assert_eq!(
+///     data2_chunk.decompress().unwrap(),
+///     schunk.get_chunk(1).unwrap().decompress().unwrap()
+/// );
+///
+/// // Random access individual items within the super-chunk
+/// assert_eq!(5, i32::from_ne_bytes(schunk.item(4).unwrap().try_into().unwrap()));
+/// assert_eq!(12, i32::from_ne_bytes(schunk.item(11).unwrap().try_into().unwrap()));
+/// ```
 pub struct SChunk(NonNull<blosc2_sys::blosc2_schunk>);
 impl SChunk {
     /// Create a new in-memory super chunk.
     ///
     /// The created super chunk will not be contiguous. See [`Self::new`] for more details.
-    pub fn new_in_memory(cparams: CParams, dparams: DParams) -> Result<Self, Error> {
-        Self::new(false, None, cparams, dparams)
+    pub fn new(cparams: CParams, dparams: DParams) -> Result<Self, Error> {
+        Self::new_at(SChunkStorageParams::in_memory(), cparams, dparams)
     }
 
     /// Create a new on-disk super chunk at the given path.
     ///
     /// The created super chunk will not be contiguous. See [`Self::new`] for more details.
     pub fn new_on_disk(urlpath: &Path, cparams: CParams, dparams: DParams) -> Result<Self, Error> {
-        Self::new(false, Some(urlpath), cparams, dparams)
+        Self::new_at(SChunkStorageParams::on_disk(urlpath), cparams, dparams)
     }
 
     /// Create a new super chunk with the specified parameters.
     ///
     /// # Arguments
     ///
-    /// * `contiguous` - If true, the super chunk will be stored in a contiguous memory block.
-    ///   Note that contiguous super chunks are very inefficient for update operations.
-    /// * `urlpath` - If `Some(path)`, the super chunk will be stored on disk at the specified path.
-    ///   If `None`, the super chunk will be stored in memory.
+    /// * `storage` - parameters specifying the storage location and layout of the super chunk.
+    ///   See [`SChunkStorageParams`].
     /// * `cparams` - Compression parameters used to compress new chunks added to the super chunk.
     /// * `dparams` - Decompression parameters used to decompress chunks from the super chunk.
-    pub fn new(
-        contiguous: bool,
-        urlpath: Option<&Path>,
+    pub fn new_at(
+        storage: SChunkStorageParams,
         cparams: CParams,
         dparams: DParams,
     ) -> Result<Self, Error> {
         crate::global::global_init();
 
-        let urlpath = urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
 
         let mut storage = blosc2_sys::blosc2_storage {
-            contiguous,
+            contiguous: storage.contiguous,
             urlpath,
             cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
@@ -63,14 +111,34 @@ impl SChunk {
 
     /// Open an existing super chunk from the specified path.
     pub fn open(urlpath: &Path) -> Result<Self, Error> {
-        Self::open_with_offset(urlpath, 0)
+        Self::open_with_options(urlpath, &SChunkOpenOptions::default())
     }
 
-    /// Open an existing super chunk from the specified path with an offset.
-    pub fn open_with_offset(urlpath: &Path, offset: usize) -> Result<Self, Error> {
+    /// Open an existing super chunk from the given options.
+    pub fn open_with_options(urlpath: &Path, options: &SChunkOpenOptions) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let urlpath = path2cstr(urlpath);
-        let schunk = unsafe {
-            blosc2_sys::blosc2_schunk_open_offset(urlpath.as_ptr().cast_mut(), offset as _)
+        let schunk = match &options.mmap {
+            None => unsafe {
+                blosc2_sys::blosc2_schunk_open_offset(urlpath.as_ptr(), options.offset as _)
+            },
+            Some(mode) => {
+                let mode = match mode {
+                    MmapMode::Read => blosc2_sys::blosc2_rs_mmap_mode_BLOSC2_RS_MMAP_READ,
+                    MmapMode::ReadWrite => {
+                        blosc2_sys::blosc2_rs_mmap_mode_BLOSC2_RS_MMAP_READ_WRITE
+                    }
+                    MmapMode::Cow => blosc2_sys::blosc2_rs_mmap_mode_BLOSC2_RS_MMAP_COW,
+                };
+                unsafe {
+                    blosc2_sys::blosc2_rs_schunk_open_mmap(
+                        urlpath.as_ptr(),
+                        options.offset as _,
+                        mode,
+                    )
+                }
+            }
         };
         unsafe { Self::from_raw_ptr(schunk.cast()) }
     }
@@ -108,7 +176,11 @@ impl SChunk {
 
     /// Serialize the super chunk to a file.
     ///
+    /// Either a single file or a directory will be created at `urlpath`, depending if the schunk is sparse or
+    /// contiguous. See [`SChunkStorageParams`]
+    ///
     /// # Arguments
+    ///
     /// * `urlpath` - The path to the file where the super chunk will be saved.
     /// * `append` - If true, the super chunk will be appended to the file. If false, the file
     ///   should not exist, otherwise an error will be returned.
@@ -163,8 +235,8 @@ impl SChunk {
     /// Append (uncompressed) data to the super chunk as a new chunk.
     ///
     /// The data will be compressed using the compression parameters of the super chunk.
-    pub fn append(&mut self, data: &[u8]) -> Result<(), Error> {
-        if data.is_empty() {
+    pub fn append(&mut self, items: &[u8]) -> Result<(), Error> {
+        if items.is_empty() {
             crate::trace!("Empty chunk is not allowed");
             return Err(Error::ReadBuffer);
         }
@@ -173,8 +245,8 @@ impl SChunk {
         unsafe {
             blosc2_sys::blosc2_schunk_append_buffer(
                 self.0.as_ptr(),
-                data.as_ptr().cast(),
-                data.len() as _,
+                items.as_ptr().cast(),
+                items.len() as _,
             )
             .into_result()?;
         };
@@ -297,49 +369,34 @@ impl SChunk {
     /// Copy the super chunk to a new in-memory super chunk.
     ///
     /// The created super chunk will not be contiguous. See [`Self::copy`] for more details.
-    pub fn copy_to_memory(&self, cparams: CParams, dparams: DParams) -> Result<SChunk, Error> {
-        self.copy(false, None, cparams, dparams)
-    }
-
-    /// Copy the super chunk to a new on-disk super chunk at the specified path.
-    ///
-    /// The created super chunk will not be contiguous. See [`Self::copy`] for more details.
-    pub fn copy_to_disk(
-        &self,
-        urlpath: &Path,
-        cparams: CParams,
-        dparams: DParams,
-    ) -> Result<SChunk, Error> {
-        self.copy(false, Some(urlpath), cparams, dparams)
+    pub fn copy(&self, cparams: CParams, dparams: DParams) -> Result<SChunk, Error> {
+        self.copy_to(SChunkStorageParams::in_memory(), cparams, dparams)
     }
 
     /// Copy the super chunk to a new super chunk with the specified parameters.
     ///
     /// # Arguments
     ///
-    /// * `contiguous` - If true, the super chunk will be stored in a contiguous memory block.
-    ///   Note that contiguous super chunks are very inefficient for update operations.
-    /// * `urlpath` - If `Some(path)`, the super chunk will be stored on disk at the specified path.
-    ///   If `None`, the super chunk will be stored in memory.
+    /// * `storage` - parameters specifying the storage location and layout of the super chunk.
+    ///   See [`SChunkStorageParams`].
     /// * `cparams` - Compression parameters used to compress new chunks added to the super chunk.
     /// * `dparams` - Decompression parameters used to decompress chunks from the super chunk.
-    pub fn copy(
+    pub fn copy_to(
         &self,
-        contiguous: bool,
-        urlpath: Option<&Path>,
+        storage: SChunkStorageParams,
         cparams: CParams,
         dparams: DParams,
     ) -> Result<SChunk, Error> {
         crate::global::global_init();
 
-        let urlpath = urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr);
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
             .unwrap_or(std::ptr::null_mut());
 
         let mut storage = blosc2_sys::blosc2_storage {
-            contiguous,
+            contiguous: storage.contiguous,
             urlpath,
             cparams: (&cparams.0 as *const blosc2_sys::blosc2_cparams).cast_mut(),
             dparams: (&dparams.0 as *const blosc2_sys::blosc2_dparams).cast_mut(),
@@ -415,6 +472,13 @@ impl SChunk {
     /// undefined behavior may occur. Alternatively, the caller can use [`Self::item_into`] and provide an already
     /// aligned destination buffer.
     ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index of the item to retrieve. Must be in range `[0, items_num())`.
+    ///
+    /// # Returns
+    ///
+    /// The decompressed item as a vector of bytes, of size `typesize`.
     pub fn item(&self, idx: usize) -> Result<Vec<u8>, Error> {
         self.items(idx..idx + 1)
     }
@@ -426,9 +490,13 @@ impl SChunk {
     /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
     /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
     ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index of the item to retrieve. Must be in range `[0, items_num())`.
+    ///
     /// # Returns
     ///
-    /// The number of bytes copied into the destination buffer.
+    /// The number of bytes copied into the destination buffer, `typesize`.
     pub fn item_into(&self, idx: usize, dst: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
         self.items_into(idx..idx + 1, dst)
     }
@@ -442,6 +510,14 @@ impl SChunk {
     /// the original data type, the bytes should be copied to a new aligned allocation before transmuting, otherwise
     /// undefined behavior may occur. Alternatively, the caller can use [`Self::items_into`] and provide an already
     /// aligned destination buffer.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index range of the items to retrieve. Must be in range `[0, items_num())`.
+    ///
+    /// # Returns
+    ///
+    /// The decompressed items as a vector of bytes, of size `typesize * idx.len()`.
     pub fn items(&self, idx: std::ops::Range<usize>) -> Result<Vec<u8>, Error> {
         let mut dst = Vec::<MaybeUninit<u8>>::with_capacity(self.typesize() * idx.len());
         unsafe { dst.set_len(self.typesize() * idx.len()) };
@@ -460,9 +536,13 @@ impl SChunk {
     /// Note that if the destination buffer is not aligned to the original data type's alignment, the caller should
     /// not transmute the decompressed data to original type, as this may lead to undefined behavior.
     ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index range of the items to retrieve. Must be in range `[0, items_num())`.
+    ///
     /// # Returns
     ///
-    /// The number of bytes copied into the destination buffer.
+    /// The number of bytes copied into the destination buffer, `typesize * idx.len()`.
     pub fn items_into(
         &self,
         idx: std::ops::Range<usize>,
@@ -501,6 +581,11 @@ impl SChunk {
     /// Set an item at the specified index.
     ///
     /// Note that this will re-compress the affected chunk(s) in the super chunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index of the item to set. Must be in range `[0, items_num())`.
+    /// * `value` - The new value for the item. Must be of size `typesize`.
     pub fn set_item(&mut self, idx: usize, value: &[u8]) -> Result<(), Error> {
         self.set_items(idx..idx + 1, value)
     }
@@ -508,6 +593,11 @@ impl SChunk {
     /// Set a range of items specified by the index range.
     ///
     /// Note that this will re-compress the affected chunk(s) in the super chunk.
+    ///
+    /// # Arguments
+    ///
+    /// * `idx` - The index range of the items to set. Must be in range `[0, items_num())`.
+    /// * `values` - The new values for the items. Must be of size `typesize * idx.len()`.
     pub fn set_items(&mut self, idx: std::ops::Range<usize>, values: &[u8]) -> Result<(), Error> {
         let expected_length = idx.len() * self.typesize();
         if expected_length != values.len() {
@@ -540,6 +630,70 @@ impl Drop for SChunk {
     }
 }
 
+/// Storage parameters for an [`SChunk`], also used by [`Ndarray`](crate::nd::Ndarray).
+#[derive(Debug, Clone)]
+pub struct SChunkStorageParams<'a> {
+    /// If true, the super chunk will be stored in a contiguous memory block.
+    /// Note that contiguous super chunks may be inefficient for update operations.
+    pub contiguous: bool,
+    /// If `Some(path)`, the super chunk will be stored on disk at the specified path.
+    /// If `None`, the super chunk will be stored in memory.
+    pub urlpath: Option<&'a Path>,
+}
+impl<'a> SChunkStorageParams<'a> {
+    /// Create storage parameters for an in-memory super chunk.
+    ///
+    /// The storage will not be contiguous.
+    pub fn in_memory() -> Self {
+        Self {
+            contiguous: false,
+            urlpath: None,
+        }
+    }
+
+    /// Create storage parameters for a super chunk stored on disk.
+    ///
+    /// The storage will not be contiguous.
+    pub fn on_disk(urlpath: &'a Path) -> Self {
+        Self {
+            contiguous: false,
+            urlpath: Some(urlpath),
+        }
+    }
+}
+/// Options for opening a super chunk, also used by [`Ndarray`](crate::nd::Ndarray).
+#[derive(Clone, Default)]
+pub struct SChunkOpenOptions {
+    offset: u64,
+    mmap: Option<MmapMode>,
+}
+impl SChunkOpenOptions {
+    /// Create an options struct with default options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the offset in the file from which to read the super chunk.
+    pub fn offset(&mut self, offset: u64) -> &mut Self {
+        self.offset = offset;
+        self
+    }
+
+    /// Set the memory-mapped mode for the super chunk.
+    ///
+    /// `None` means that no memory mapping will be used.
+    ///
+    /// # Safety
+    ///
+    /// This function is marked unsafe because of the potential for Undefined Behavior (UB)
+    /// using the mapped memory if the underlying file is subsequently modified, in or out of process.
+    /// Applications must consider the risk and take appropriate precautions when using file-backed maps.
+    pub unsafe fn mmap(&mut self, mmap: Option<MmapMode>) -> &mut Self {
+        self.mmap = mmap;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::File;
@@ -549,10 +703,10 @@ mod tests {
     use rand::prelude::*;
 
     use crate::chunk::tests::{rand_chunk, rand_chunk_data};
-    use crate::chunk::Chunk;
+    use crate::chunk::{Chunk, Encoder, SChunk, SChunkOpenOptions, SChunkStorageParams};
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams, rand_src_len};
-    use crate::util::{CowVec, FfiVec};
-    use crate::{CParams, DParams, Encoder, SChunk};
+    use crate::util::{CowVec, FfiVec, MmapMode};
+    use crate::{CParams, DParams};
 
     #[test]
     fn round_trip() {
@@ -770,11 +924,21 @@ mod tests {
             });
             schunk.to_file(&urlpath, padding.is_some()).unwrap();
 
-            let mut schunk2 = if let Some(padding) = padding {
-                SChunk::open_with_offset(&urlpath, padding).unwrap()
-            } else {
-                SChunk::open(&urlpath).unwrap()
+            let contiguous = unsafe { schunk.0.as_ref().storage.as_ref().unwrap().contiguous };
+            let offset = padding.unwrap_or(0) as u64;
+            let mmap = (contiguous && rand.random::<bool>()).then(|| {
+                *[MmapMode::Read, MmapMode::ReadWrite, MmapMode::Cow]
+                    .choose(&mut rand)
+                    .unwrap()
+            });
+            let mut schunk2 = match (offset, mmap) {
+                (0, None) => SChunk::open(&urlpath).unwrap(),
+                (_, _) => SChunk::open_with_options(&urlpath, unsafe {
+                    SChunkOpenOptions::new().offset(offset).mmap(mmap)
+                })
+                .unwrap(),
             };
+
             assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
         }
     }
@@ -886,7 +1050,7 @@ mod tests {
                         .take(typesize)
                         .collect::<Vec<u8>>();
                     schunk.set_item(idx, &item).unwrap();
-                    items_data[idx] = item.clone();
+                    items_data[idx].clone_from(&item);
 
                     assert_eq!(item, schunk.item(idx).unwrap());
 
@@ -910,7 +1074,7 @@ mod tests {
                     let items_continous = items.iter().flatten().cloned().collect::<Vec<u8>>();
                     schunk.set_items(start..end, &items_continous).unwrap();
                     for (i, item) in items.iter().enumerate() {
-                        items_data[start + i] = item.clone();
+                        items_data[start + i].clone_from(item);
                     }
 
                     #[allow(clippy::needless_range_loop)]
@@ -949,17 +1113,37 @@ mod tests {
             let temp_dir = tempfile::TempDir::new().unwrap();
             let urlpath = temp_dir.path().join("schunk-dir2");
             let mut schunk2 = match rand.random_range(0..4) {
-                0 => schunk.copy_to_memory(cparams, dparams).unwrap(),
-                1 => schunk.copy(true, None, cparams, dparams).unwrap(),
-                2 => schunk.copy_to_disk(&urlpath, cparams, dparams).unwrap(),
-                3 => schunk.copy(true, Some(&urlpath), cparams, dparams).unwrap(),
+                0 => schunk.copy(cparams, dparams).unwrap(),
+                1 => schunk
+                    .copy_to(
+                        SChunkStorageParams {
+                            contiguous: true,
+                            urlpath: None,
+                        },
+                        cparams,
+                        dparams,
+                    )
+                    .unwrap(),
+                2 => schunk
+                    .copy_to(SChunkStorageParams::on_disk(&urlpath), cparams, dparams)
+                    .unwrap(),
+                3 => schunk
+                    .copy_to(
+                        SChunkStorageParams {
+                            contiguous: true,
+                            urlpath: Some(&urlpath),
+                        },
+                        cparams,
+                        dparams,
+                    )
+                    .unwrap(),
                 _ => unreachable!(),
             };
             assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
         }
     }
 
-    fn rand_chunks_data_non_empty(typesize: usize, rand: &mut StdRng) -> Vec<Vec<u8>> {
+    fn rand_chunks_data_non_empty(typesize: usize, rand: &mut impl Rng) -> Vec<Vec<u8>> {
         assert!(typesize > 0);
         for _ in 0..100 {
             let data = rand_chunks_data(typesize, rand);
@@ -970,7 +1154,7 @@ mod tests {
         panic!()
     }
 
-    fn rand_chunks_data(typesize: usize, rand: &mut StdRng) -> Vec<Vec<u8>> {
+    fn rand_chunks_data(typesize: usize, rand: &mut impl Rng) -> Vec<Vec<u8>> {
         let chunks_num = rand.random_range(0..512);
         let chunk_size = if chunks_num == 0 {
             0
@@ -991,14 +1175,14 @@ mod tests {
             .collect()
     }
 
-    fn rand_chunk_ownership<'a>(chunk: &'a Chunk, rand: &mut StdRng) -> Chunk<'a> {
+    fn rand_chunk_ownership<'a>(chunk: &'a Chunk, rand: &mut impl Rng) -> Chunk<'a> {
         Chunk {
             buffer: rand_bytes_ownership(&chunk.buffer, rand),
             ..chunk.shallow_clone()
         }
     }
 
-    fn rand_bytes_ownership<'a>(bytes: &'a CowVec<u8>, rand: &mut StdRng) -> CowVec<'a, u8> {
+    fn rand_bytes_ownership<'a>(bytes: &'a CowVec<u8>, rand: &mut impl Rng) -> CowVec<'a, u8> {
         match rand.random_range(0..3) {
             0 => CowVec::Borrowed(bytes.as_slice()),
             1 => CowVec::OwnedRust(bytes.as_slice().to_vec()),
@@ -1052,14 +1236,30 @@ mod tests {
         }
     }
 
-    fn new_schunk(cparams: CParams, dparams: DParams, rand: &mut StdRng) -> SChunkWrapper {
+    fn new_schunk(cparams: CParams, dparams: DParams, rand: &mut impl Rng) -> SChunkWrapper {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let urlpath = temp_dir.path().join("schunk-dir");
         let schunk = match rand.random_range(0..4) {
-            0 => SChunk::new_in_memory(cparams, dparams).unwrap(),
-            1 => SChunk::new(true, None, cparams, dparams).unwrap(),
+            0 => SChunk::new(cparams, dparams).unwrap(),
+            1 => SChunk::new_at(
+                SChunkStorageParams {
+                    contiguous: true,
+                    urlpath: None,
+                },
+                cparams,
+                dparams,
+            )
+            .unwrap(),
             2 => SChunk::new_on_disk(&urlpath, cparams, dparams).unwrap(),
-            3 => SChunk::new(true, Some(&urlpath), cparams, dparams).unwrap(),
+            3 => SChunk::new_at(
+                SChunkStorageParams {
+                    contiguous: true,
+                    urlpath: Some(&urlpath),
+                },
+                cparams,
+                dparams,
+            )
+            .unwrap(),
             _ => unreachable!(),
         };
         SChunkWrapper { temp_dir, schunk }
