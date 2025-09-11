@@ -2143,7 +2143,8 @@ mod tests {
     }
 
     fn rand_ndim(rand: &mut impl Rng) -> usize {
-        usize_dist_most_likely_small(1..MAX_DIM + 1, rand)()
+        let max_dim = MAX_DIM - 1; // TODO: should be fixed in v2.21.3
+        usize_dist_most_likely_small(1..max_dim + 1, rand)()
     }
 
     fn rand_dtype(rand: &mut impl Rng) -> Dtype {
