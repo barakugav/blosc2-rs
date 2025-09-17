@@ -16,7 +16,7 @@ use std::ptr::NonNull;
 
 use crate::chunk::{SChunk, SChunkOpenOptions, SChunkStorageParams};
 use crate::error::{Error, ErrorCode};
-use crate::util::{path2cstr, ArrayVec};
+use crate::util::{path2cstr, ArrayVec, CowVec};
 
 /// The maximum number of dimensions for an Ndarray.
 pub const MAX_DIM: usize = blosc2_sys::B2ND_MAX_DIM as usize;
@@ -456,6 +456,28 @@ impl Ndarray {
         )
     }
 
+    /// Creates a new ndarray from a serialized byte buffer.
+    ///
+    /// The byte buffer must be created using [`Ndarray::to_bytes`].
+    /// The bytes are the serialized representation of the ndarray, for example for saving to disk or
+    /// sending over the network.
+    ///
+    /// The created ndarray will be contiguous in memory.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        let mut array = MaybeUninit::<*mut blosc2_sys::b2nd_array_t>::uninit();
+        unsafe {
+            blosc2_sys::b2nd_from_cframe(
+                bytes.as_ptr().cast_mut(),
+                bytes.len() as _,
+                true,
+                array.as_mut_ptr(),
+            )
+            .into_result()?
+        };
+        let array = unsafe { array.assume_init() };
+        unsafe { Self::from_raw_ptr(array.cast()) }
+    }
+
     /// Creates a new blosc ndarray from an existing [`ndarray::ArrayBase`].
     ///
     /// # Arguments
@@ -878,6 +900,29 @@ impl Ndarray {
         let slice = unsafe { slice.unwrap_unchecked() };
 
         self.slice_buf_into(slice.as_slice(), dst)
+    }
+
+    /// Serialize the ndarray into a byte buffer.
+    ///
+    /// The returned buffer can be deserialized back into an ndarray using [`Ndarray::from_bytes`].
+    pub fn to_bytes(&self) -> Result<CowVec<u8>, Error> {
+        let mut buffer = MaybeUninit::uninit();
+        let mut buffer_len = MaybeUninit::uninit();
+        let mut needs_free = MaybeUninit::uninit();
+        unsafe {
+            blosc2_sys::b2nd_to_cframe(
+                self.as_ptr(),
+                buffer.as_mut_ptr(),
+                buffer_len.as_mut_ptr(),
+                needs_free.as_mut_ptr(),
+            )
+            .into_result()?
+        };
+
+        let buffer = NonNull::new(unsafe { buffer.assume_init() }).ok_or(Error::Failure)?;
+        let buffer_len = unsafe { buffer_len.assume_init() };
+        let needs_free = unsafe { needs_free.assume_init() };
+        Ok(unsafe { CowVec::from_c_buf(buffer, buffer_len as usize, needs_free) })
     }
 
     /// Get a slice of the array as an [`ndarray::Array`].
@@ -1740,25 +1785,22 @@ mod tests {
                 std::fs::write(&path, vec![0; padding]).unwrap();
                 padding
             });
-            let contiguous = rand.random::<bool>();
-            {
-                let array = Ndarray::from_items_bytes_at(
-                    &data,
-                    dtype,
-                    &shape,
-                    SChunkStorageParams {
-                        contiguous,
-                        urlpath: None,
-                    },
-                    &params,
-                )
-                .unwrap();
-                let written_offset = array.save(&path, padding.is_some()).unwrap();
-                assert_eq!(written_offset, padding.unwrap_or(0) as u64);
-            }
+            let array = Ndarray::from_items_bytes_at(
+                &data,
+                dtype,
+                &shape,
+                SChunkStorageParams {
+                    contiguous: rand.random::<bool>(),
+                    urlpath: None,
+                },
+                &params,
+            )
+            .unwrap();
+            let written_offset = array.save(&path, padding.is_some()).unwrap();
+            assert_eq!(written_offset, padding.unwrap_or(0) as u64);
 
             let offset = padding.unwrap_or(0) as u64;
-            let mmap = (contiguous && rand.random::<bool>()).then(|| {
+            let mmap = (array.is_contiguous() && rand.random::<bool>()).then(|| {
                 *[MmapMode::Read, MmapMode::ReadWrite, MmapMode::Cow]
                     .choose(&mut rand)
                     .unwrap()
@@ -2111,7 +2153,55 @@ mod tests {
         }
     }
 
-    fn rand_params(rand: &mut impl Rng) -> (Vec<usize>, Dtype, NdarrayParams) {
+    #[test]
+    fn to_from_bytes() {
+        let mut rand = StdRng::seed_from_u64(0xf9e78f61125e24d4);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let storage = rand_storage(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+            let array = Ndarray::from_items_bytes_at(
+                &data,
+                dtype.clone(),
+                &shape,
+                storage.params(),
+                &params,
+            )
+            .unwrap();
+
+            let array_bytes = array.to_bytes().unwrap();
+            let array2 = Ndarray::from_bytes(&array_bytes).unwrap();
+
+            assert_eq!(array.shape(), array2.shape());
+            assert_eq!(array.dtype(), array2.dtype());
+            assert_eq!(
+                array.to_items_bytes().unwrap(),
+                array2.to_items_bytes().unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn is_contiguous() {
+        let mut rand = StdRng::seed_from_u64(0x9ca8a39f70635048);
+        for _ in 0..30 {
+            let (shape, dtype, params) = rand_params(&mut rand);
+            let storage = rand_storage(&mut rand);
+            let data = rand_data(&dtype, &shape, &mut rand);
+            let array = Ndarray::from_items_bytes_at(
+                &data,
+                dtype.clone(),
+                &shape,
+                storage.params(),
+                &params,
+            )
+            .unwrap();
+
+            assert_eq!(storage.contiguous, array.is_contiguous());
+        }
+    }
+
+    pub(crate) fn rand_params(rand: &mut impl Rng) -> (Vec<usize>, Dtype, NdarrayParams) {
         let dtype = rand_dtype(rand);
         let (shape, params) = rand_params_with_dtype(&dtype, rand);
         (shape, dtype, params)
@@ -2240,7 +2330,7 @@ mod tests {
             .collect()
     }
 
-    fn rand_data(dtype: &Dtype, shape: &[usize], rand: &mut impl Rng) -> Vec<u8> {
+    pub(crate) fn rand_data(dtype: &Dtype, shape: &[usize], rand: &mut impl Rng) -> Vec<u8> {
         struct GenOp<R> {
             rand: R,
         }
@@ -2483,24 +2573,24 @@ mod tests {
         inner_fields
     }
 
-    fn rand_storage(rand: &mut impl Rng) -> StorageWrapper {
-        let continues = rand.random::<bool>();
+    pub(crate) fn rand_storage(rand: &mut impl Rng) -> StorageWrapper {
+        let contiguous = rand.random::<bool>();
         let path = rand.random::<bool>().then(|| {
             let dir = tempfile::TempDir::new().unwrap();
             let path = dir.path().join("test.b");
             (dir, path)
         });
-        StorageWrapper { path, continues }
+        StorageWrapper { path, contiguous }
     }
-    struct StorageWrapper {
+    pub(crate) struct StorageWrapper {
         path: Option<(tempfile::TempDir, PathBuf)>,
-        continues: bool,
+        contiguous: bool,
     }
     impl StorageWrapper {
-        fn params(&self) -> SChunkStorageParams<'_> {
+        pub(crate) fn params(&self) -> SChunkStorageParams<'_> {
             SChunkStorageParams {
                 urlpath: self.path.as_ref().map(|(_, p)| p.as_path()),
-                contiguous: self.continues,
+                contiguous: self.contiguous,
             }
         }
     }
