@@ -566,6 +566,12 @@ impl_dtyped_scalar!(Complex<f32>, ComplexF32);
 impl_dtyped_scalar!(Complex<f64>, ComplexF64);
 impl_dtyped_scalar!(bool, Bool);
 
+unsafe impl<T: Dtyped, const N: usize> Dtyped for [T; N] {
+    fn dtype() -> Dtype {
+        T::dtype().with_shape(vec![N]).unwrap()
+    }
+}
+
 fn ceil_to_multiple(x: usize, m: usize) -> usize {
     assert!(m > 0);
     x.div_ceil(m) * m
