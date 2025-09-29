@@ -9,9 +9,8 @@ Rust bindings for blosc2 - a fast, compressed, persistent binary data store libr
 Provide a safe interface to the [blosc2](https://github.com/Blosc/c-blosc2) library, which is a
 new major version of the original [blosc](https://github.com/barakugav/blosc-rs) library.
 
-The library provides [`Ndarray`](crate::nd::Ndarray), an n-dimensional array implementation with compressed
-storage, and some lower level utilities for working with compressed data such as [`Chunk`](crate::chunk::Chunk)
-and [`SChunk`](crate::chunk::SChunk).
+The library provides `Ndarray`, an n-dimensional array implementation with compressed
+storage, and some lower level utilities for working with compressed data such as `Chunk` and `SChunk`.
 
 
 ### Getting Started
@@ -22,7 +21,7 @@ To use this library, add the following to your `Cargo.toml`:
 blosc2 = "0.1"
 ```
 
-The [`Ndarray`](crate::nd::Ndarray) is an n-dimensional array with compressed storage, that support random access
+The `Ndarray` is an n-dimensional array with compressed storage, that support random access
 to items or slices.
 In the following example, we create a new `Ndarray` from an array from the `ndarray` crate, and than access its
 elements and slice:
@@ -43,20 +42,20 @@ let slice_arr: ndarray::Array2<i32> = arr.slice(&[0..2, 1..3]).unwrap();
 assert_eq!(slice_arr, ndarray::array![[2, 3], [5, 6]]);
 ```
 
-The library provides a high level [`Ndarray`](crate::nd::Ndarray) struct, which is built upon the
-[`SChunk`](crate::chunk::SChunk), that in itself is built upon [`Chunk`](crate::chunk::Chunk).
+The library provides a high level `Ndarray` struct, which is built upon the
+`SChunk`, that in itself is built upon `Chunk`.
 Most users will probably interact only with the `Ndarray`, but the chunks types are also available.
 
 
 ## Features
 - `zlib`: Enable support for the zlib compression codec.
 - `zstd`: Enable support for the zstd compression codec.
-- `ndarray`: Enable conversions between blosc2's [`Ndarray`](crate::nd::Ndarray) and the `ndarray` crate's
+- `ndarray`: Enable conversions between blosc2's `Ndarray` and the `ndarray` crate's
   `ArrayBase` types.
-- `half`: Add a dependency to the `half` crate, and implement the [`Dtyped`](crate::nd::Dtyped) trait for
-  `half::f16`. See [`crate::util`] for the info.
-- `num-complex`: Add a dependency to the `num-complex` crate, and implement the [`Dtyped`](crate::nd::Dtyped) trait
-  for `num_complex::Complex<f32>` and `num_complex::Complex<f64>`. See [`crate::util`] for the info.
+- `half`: Add a dependency to the `half` crate, and implement the `Dtyped` trait for
+  `half::f16`. See the `util` module for the info.
+- `num-complex`: Add a dependency to the `num-complex` crate, and implement the `Dtyped` trait
+  for `num_complex::Complex<f32>` and `num_complex::Complex<f64>`. See the `util` module for the info.
 
 ## Error Handling
 The library follow the C API and returns error codes. In addition, if the environment variable
