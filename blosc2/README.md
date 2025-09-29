@@ -14,7 +14,7 @@ storage, and some lower level utilities for working with compressed data such as
 To use this library, add the following to your `Cargo.toml`:
 ```toml
 [dependencies]
-blosc2 = "0.1"
+blosc2 = "0.2"
 ```
 
 The `Ndarray` is an n-dimensional array with compressed storage, that support random access
