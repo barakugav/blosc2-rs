@@ -453,6 +453,11 @@ impl SChunk {
         unsafe { self.0.as_ref() }.typesize as usize
     }
 
+    /// Check whether the super chunk is contiguous (otherwise sparse).
+    pub fn is_contiguous(&self) -> bool {
+        unsafe { self.0.as_ref().storage.as_ref().unwrap().contiguous }
+    }
+
     /// Get the number of items in the super chunk.
     ///
     /// The returned number is the total number of items across all chunks in the super chunk.
@@ -924,9 +929,8 @@ mod tests {
             });
             schunk.to_file(&urlpath, padding.is_some()).unwrap();
 
-            let contiguous = unsafe { schunk.0.as_ref().storage.as_ref().unwrap().contiguous };
             let offset = padding.unwrap_or(0) as u64;
-            let mmap = (contiguous && rand.random::<bool>()).then(|| {
+            let mmap = (schunk.is_contiguous() && rand.random::<bool>()).then(|| {
                 *[MmapMode::Read, MmapMode::ReadWrite, MmapMode::Cow]
                     .choose(&mut rand)
                     .unwrap()

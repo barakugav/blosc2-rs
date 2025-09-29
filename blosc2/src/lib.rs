@@ -52,9 +52,9 @@
 //! - `ndarray`: Enable conversions between blosc2's [`Ndarray`](crate::nd::Ndarray) and the `ndarray` crate's
 //!   `ArrayBase` types.
 //! - `half`: Add a dependency to the `half` crate, and implement the [`Dtyped`](crate::nd::Dtyped) trait for
-//!   `half::f16`. See [`crate::util`] for the info.
+//!   `half::f16`. See the [`util`] module for the info.
 //! - `num-complex`: Add a dependency to the `num-complex` crate, and implement the [`Dtyped`](crate::nd::Dtyped) trait
-//!   for `num_complex::Complex<f32>` and `num_complex::Complex<f64>`. See [`crate::util`] for the info.
+//!   for `num_complex::Complex<f32>` and `num_complex::Complex<f64>`. See the [`util`] module for the info.
 //!
 //! ## Error Handling
 //! The library follow the C API and returns error codes. In addition, if the environment variable
