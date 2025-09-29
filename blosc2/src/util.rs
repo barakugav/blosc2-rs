@@ -334,7 +334,16 @@ pub(crate) mod tests {
     use rand::distr::weighted::WeightedIndex;
     use rand::prelude::*;
 
+    use crate::util::CowVec;
     use crate::{CParams, CompressAlgo, DParams, Filter, SplitMode};
+
+    #[test]
+    fn cow_vec_covariant() {
+        #[allow(unused)]
+        fn assert_covariant<'a, 'b: 'a, T>(x: CowVec<'b, T>) -> CowVec<'a, T> {
+            x
+        }
+    }
 
     pub(crate) fn rand_src_len(typesize: usize, rand: &mut impl Rng) -> usize {
         if typesize == 0 {

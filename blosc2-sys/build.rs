@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn main() {
     generate_bindings();
@@ -41,18 +41,10 @@ fn generate_bindings() {
 fn build_c_lib() -> String {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
 
-    let blosc_orig_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+    let blosc_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .join("third-party")
         .join("c-blosc2");
-    println!("cargo::rerun-if-changed={}", blosc_orig_dir.display());
-
-    // copy blosc_dir to OUT_DIR.
-    // Required because the build process modify the sources, and we are not allowed to modify any
-    // files outside of OUT_DIR.
-    let blosc_dir = out_dir.join("c-blosc2");
-    if !blosc_dir.exists() {
-        copy_recursively(&blosc_orig_dir, &blosc_dir).unwrap();
-    }
+    println!("cargo::rerun-if-changed={}", blosc_dir.display());
 
     let mut build = cmake::Config::new(&blosc_dir);
     let bool2opt = |b: bool| if b { "ON" } else { "OFF" };
@@ -92,17 +84,4 @@ fn build_c_lib_extension() {
         .file(sources_dir.join("blosc2_rs.c"))
         .include(sources_dir)
         .compile(&format!("blosc2_rs_c_ext_{}", env!("CARGO_PKG_VERSION")));
-}
-
-fn copy_recursively(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if src.is_file() {
-        std::fs::copy(src, dst)?;
-    } else {
-        std::fs::create_dir(dst)?;
-        for entry in std::fs::read_dir(src)? {
-            let entry = entry?;
-            copy_recursively(&entry.path(), &dst.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
 }
