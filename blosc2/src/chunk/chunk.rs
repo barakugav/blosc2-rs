@@ -329,6 +329,14 @@ pub(crate) mod tests {
         }
     }
 
+    #[test]
+    fn chunk_covariant() {
+        #[allow(unused)]
+        fn assert_covariant<'a, 'b: 'a>(x: Chunk<'b>) -> Chunk<'a> {
+            x
+        }
+    }
+
     pub(crate) fn rand_chunk(size: usize, params: CParams, rand: &mut impl Rng) -> Chunk<'static> {
         let data = rand_chunk_data(size, rand);
         Encoder::new(params).unwrap().compress(&data).unwrap()
