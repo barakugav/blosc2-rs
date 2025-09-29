@@ -905,7 +905,7 @@ impl Ndarray {
     /// Serialize the ndarray into a byte buffer.
     ///
     /// The returned buffer can be deserialized back into an ndarray using [`Ndarray::from_bytes`].
-    pub fn to_bytes(&self) -> Result<CowVec<u8>, Error> {
+    pub fn to_bytes(&self) -> Result<CowVec<'_, u8>, Error> {
         let mut buffer = MaybeUninit::uninit();
         let mut buffer_len = MaybeUninit::uninit();
         let mut needs_free = MaybeUninit::uninit();
