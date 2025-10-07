@@ -432,7 +432,11 @@ pub(crate) mod tests {
             params.splitmode(*splitmode);
         }
 
-        let mut basic_filters = vec![Filter::ByteShuffle, Filter::BitShuffle, Filter::Delta];
+        let mut basic_filters = vec![Filter::ByteShuffle, Filter::BitShuffle];
+        if false {
+            // TODO: https://github.com/Blosc/c-blosc2/issues/701
+            basic_filters.push(Filter::Delta);
+        }
         if lossy && [4, 8].contains(&params.get_typesize()) {
             basic_filters.push(Filter::TruncPrecision {
                 prec_bits: rand.random_range(0..=10),

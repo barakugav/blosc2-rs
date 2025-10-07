@@ -32,14 +32,21 @@ pub enum Filter {
     /// `[1_1, 2_1, ..., N_1, 1_2, 2_2, ..., N_2, ..., 1_S, 2_S, ..., N_S]`,
     /// where `i_j` is the j-th byte of the i-th element.
     ByteShuffle,
+
     /// Bit shuffle filter.
     ///
     /// Similar to `ByteShuffle`, but operates on bits instead of bytes.
     BitShuffle,
+
     /// Delta filter.
     ///
     /// This filter encodes the data as differences between consecutive elements.
+    ///
+    /// The C library seems to have some issues with this filter, and some bugs are known to exist.
+    /// For now, it is recommended to avoid using this filter until the issues are resolved.
+    /// See for example https://github.com/Blosc/c-blosc2/issues/701
     Delta,
+
     /// Truncation precision filter for floating point data.
     ///
     /// This filter reduces the precision of floating point numbers by truncating the least
@@ -201,7 +208,11 @@ impl CParams {
             let (filter, meta) = match filter {
                 Filter::ByteShuffle => (blosc2_sys::BLOSC_SHUFFLE, 0),
                 Filter::BitShuffle => (blosc2_sys::BLOSC_BITSHUFFLE, 0),
-                Filter::Delta => (blosc2_sys::BLOSC_DELTA, 0),
+                Filter::Delta => {
+                    // TODO: https://github.com/Blosc/c-blosc2/issues/701
+                    println!("Warning, the delta filter seems buggy in c-blosc2!");
+                    (blosc2_sys::BLOSC_DELTA, 0)
+                }
                 Filter::TruncPrecision { prec_bits } => {
                     (blosc2_sys::BLOSC_TRUNC_PREC, *prec_bits as u8)
                 }
