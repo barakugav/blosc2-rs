@@ -1567,9 +1567,9 @@ mod tests {
     use rand::prelude::*;
 
     use super::{Ndarray, NdarrayInitValue, NdarrayParams};
-    use crate::nd::InitValueInner;
     use crate::nd::{
-        Dtype, DtypeKind, DtypeScalarKind, SChunkOpenOptions, SChunkStorageParams, MAX_DIM,
+        Dtype, DtypeKind, DtypeScalarKind, InitValueInner, SChunkOpenOptions, SChunkStorageParams,
+        MAX_DIM,
     };
     use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
     use crate::util::{f16, Complex, MmapMode};
@@ -2266,8 +2266,7 @@ mod tests {
     }
 
     fn rand_ndim(rand: &mut impl Rng) -> usize {
-        let max_dim = MAX_DIM - 1; // TODO: should be fixed in v2.21.3
-        usize_dist_most_likely_small(1..max_dim + 1, rand)()
+        usize_dist_most_likely_small(1..MAX_DIM + 1, rand)()
     }
 
     fn rand_dtype(rand: &mut impl Rng) -> Dtype {
@@ -2832,20 +2831,21 @@ mod tests {
         {
             use std::mem::MaybeUninit;
 
+            let data_bytes = super::rand_data(&T::dtype(), shape, rand);
+
             let len = shape.iter().product::<usize>();
             let mut buf = Vec::<MaybeUninit<T>>::with_capacity(len);
             unsafe { buf.set_len(len) };
-            {
-                let buf_data = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        buf.as_mut_ptr().cast::<u8>(),
-                        len * std::mem::size_of::<T>(),
-                    )
-                };
-                for (buf_elm, val) in buf_data.iter_mut().zip(rand.random_iter::<u8>()) {
-                    *buf_elm = val;
-                }
-            }
+
+            // copy data_bytes into buf
+            assert_eq!(data_bytes.len(), len * std::mem::size_of::<T>());
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data_bytes.as_ptr(),
+                    buf.as_mut_ptr().cast::<u8>(),
+                    data_bytes.len(),
+                )
+            };
             let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
             ndarray::ArrayD::from_shape_vec(shape, buf).unwrap()
         }
