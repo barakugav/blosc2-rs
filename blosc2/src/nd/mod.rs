@@ -17,6 +17,7 @@ use std::ptr::NonNull;
 use crate::chunk::{SChunk, SChunkOpenOptions, SChunkStorageParams};
 use crate::error::{Error, ErrorCode};
 use crate::util::{path2cstr, ArrayVec, CowVec};
+use crate::{CParams, DParams};
 
 /// The maximum number of dimensions for an Ndarray.
 pub const MAX_DIM: usize = blosc2_sys::B2ND_MAX_DIM as usize;
@@ -742,6 +743,38 @@ impl Ndarray {
     /// Get the shape of blocks in the ndarary.
     pub fn blockshape(&self) -> &[i32] {
         unsafe { std::slice::from_raw_parts(self.arr().blockshape.as_ptr(), self.ndim()) }
+    }
+
+    /// Get the compression parameters used by this super chunk.
+    pub fn cparams(&self) -> CParams {
+        let mut params = MaybeUninit::uninit();
+        unsafe {
+            blosc2_sys::blosc2_schunk_get_cparams(self.arr().sc, params.as_mut_ptr())
+                .into_result()
+                .unwrap();
+        }
+        let params = unsafe { params.assume_init() };
+
+        let mut ret = unsafe { *params };
+        ret.schunk = std::ptr::null_mut();
+        unsafe { libc::free(params as *mut _) };
+        CParams(ret)
+    }
+
+    /// Get the decompression parameters used by this super chunk.
+    pub fn dparams(&self) -> DParams {
+        let mut params = MaybeUninit::uninit();
+        unsafe {
+            blosc2_sys::blosc2_schunk_get_dparams(self.arr().sc, params.as_mut_ptr())
+                .into_result()
+                .unwrap();
+        }
+        let params = unsafe { params.assume_init() };
+
+        let mut ret = unsafe { *params };
+        ret.schunk = std::ptr::null_mut();
+        unsafe { libc::free(params as *mut _) };
+        DParams(ret)
     }
 
     /// Check whether the array is contiguous or sparse.
