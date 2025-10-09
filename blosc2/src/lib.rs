@@ -17,7 +17,7 @@
 //! To use this library, add the following to your `Cargo.toml`:
 //! ```toml
 //! [dependencies]
-//! blosc2 = "0.1"
+//! blosc2 = "0.2"
 //! ```
 //!
 //! The [`Ndarray`](crate::nd::Ndarray) is an n-dimensional array with compressed storage, that support random access
