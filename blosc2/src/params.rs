@@ -49,13 +49,15 @@ pub enum Filter {
 
     /// Truncation precision filter for floating point data.
     ///
-    /// This filter reduces the precision of floating point numbers by truncating the least
+    /// This filter reduces the precision of floating point numbers by truncating (zeros) the least
     /// significant bits.
     ///
     /// This filter is only supported for floating point types (e.g., `f32`, `f64`). This can not
-    /// be enforced by the library, there it is only checked that the typesize is 4 or 8 bytes.
+    /// be enforced by the library, there it is only a check that the typesize is 4 or 8 bytes.
+    ///
+    /// The C library seems to have some issues when this filter is used together with `ByteShuffle`.
     TruncPrecision {
-        /// The number of bits to truncate.
+        /// The number of bits to keep.
         ///
         /// Positive value will set absolute precision bits, whereas negative
         /// value will reduce the precision bits (similar to Python slicing convention).
@@ -199,8 +201,12 @@ impl CParams {
             crate::trace!("Too many filters, maximum is 6");
             return Err(Error::InvalidParam);
         }
-        if filters.len() > 2 {
-            println!("Warning, more than two filters was not tested and seems buggy!")
+        if filters
+            .iter()
+            .any(|f| matches!(f, Filter::TruncPrecision { .. }))
+            && filters.iter().any(|f| matches!(f, Filter::ByteShuffle))
+        {
+            println!("Warning, using both the trunc precision filter and byte shuffle seems buggy!")
         }
         self.0.filters = [blosc2_sys::BLOSC_NOFILTER as _; 6];
         self.0.filters_meta = [0; 6];

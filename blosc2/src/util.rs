@@ -367,10 +367,14 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn rand_cparams(rand: &mut impl Rng) -> CParams {
-        rand_cparams2(false, rand)
+        rand_cparams_with_itemsize(None, false, rand)
     }
 
-    pub(crate) fn rand_cparams2(lossy: bool, rand: &mut impl Rng) -> CParams {
+    pub(crate) fn rand_cparams_with_itemsize(
+        itemsize: Option<usize>,
+        lossy: bool,
+        rand: &mut impl Rng,
+    ) -> CParams {
         let mut params = CParams::default();
 
         let compressors = [
@@ -392,15 +396,19 @@ pub(crate) mod tests {
             params.clevel(*clevel);
         }
 
-        let typesizes = [
-            None,
-            Some(4),
-            Some(8),
-            Some(rand.random_range(1..=16)),
-            Some(rand.random_range(1..=64)),
-        ];
-        if let Some(typesize) = typesizes.choose(rand).unwrap() {
-            params.typesize(*typesize).unwrap();
+        if let Some(itemsize) = itemsize {
+            params.typesize(itemsize).unwrap();
+        } else {
+            let typesizes = [
+                None,
+                Some(4),
+                Some(8),
+                Some(rand.random_range(1..=16)),
+                Some(rand.random_range(1..=64)),
+            ];
+            if let Some(typesize) = typesizes.choose(rand).unwrap() {
+                params.typesize(*typesize).unwrap();
+            }
         }
 
         let nthreads = [None, Some(rand.random_range(0..=64))];
@@ -439,25 +447,27 @@ pub(crate) mod tests {
         }
         if lossy && [4, 8].contains(&params.get_typesize()) {
             basic_filters.push(Filter::TruncPrecision {
-                prec_bits: rand.random_range(0..=10),
+                prec_bits: -rand.random_range(1..=3),
             });
+
+            // TODO: values are wrong when both trunc precision and byte shuffle are used
+            basic_filters.retain(|f| !matches!(f, Filter::ByteShuffle));
         }
-        let filters = [Filter::ByteShuffle]
+        let filters = basic_filters
             .iter()
             .map(|f| Some(vec![f.clone()]))
             .chain([None, Some(Vec::new()), {
-                let (min_filter_num, max_filter_num) = (1, 1); // TODO: should be 6
                 let mut basic_filters = basic_filters.clone();
                 basic_filters.shuffle(rand);
                 let filters = basic_filters
                     .into_iter()
-                    .take(rand.random_range(min_filter_num..=max_filter_num))
+                    .take(rand.random_range(1..=6))
                     .collect();
                 Some(filters)
             }])
             .collect::<Vec<_>>();
-        if let Some(filter) = filters.choose(rand).unwrap() {
-            params.filters(filter).unwrap();
+        if let Some(filters) = filters.choose(rand).unwrap() {
+            params.filters(filters).unwrap();
         }
 
         params

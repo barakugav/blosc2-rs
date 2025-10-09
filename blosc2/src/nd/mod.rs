@@ -1571,7 +1571,9 @@ mod tests {
         Dtype, DtypeKind, DtypeScalarKind, InitValueInner, SChunkOpenOptions, SChunkStorageParams,
         MAX_DIM,
     };
-    use crate::util::tests::{ceil_to_multiple, rand_cparams, rand_dparams};
+    use crate::util::tests::{
+        ceil_to_multiple, rand_cparams, rand_cparams_with_itemsize, rand_dparams,
+    };
     use crate::util::{f16, Complex, MmapMode};
 
     #[cfg(feature = "ndarray")]
@@ -1898,7 +1900,12 @@ mod tests {
         {
             for _ in 0..repeat {
                 let dtype = T::dtype();
-                let (shape, params) = rand_params_with_dtype(&dtype, rand);
+                let (shape, mut params) = rand_params_with_dtype(&dtype, rand);
+                let params = params.cparams(rand_cparams_with_itemsize(
+                    Some(dtype.itemsize()),
+                    dtype == f32::dtype() || dtype == f64::dtype(),
+                    rand,
+                ));
                 let storage = rand_storage(rand);
                 let array_orig = rand_ndarray::<T>(&shape, rand);
                 let array =
@@ -1910,10 +1917,12 @@ mod tests {
                         .map(|&s| rand.random_range(0..s))
                         .collect::<Vec<_>>();
                     let item = array.get::<T>(&idx).unwrap();
-                    assert_arr_eq_nan!(
+                    assert_arr_allclose!(
                         // we use the array_eq to compare nans properly
                         &ndarray::array![item],
-                        &ndarray::array![array_orig[idx.as_slice()]]
+                        &ndarray::array![array_orig[idx.as_slice()]],
+                        1e-3,
+                        1e-6,
                     );
                 }
             }
@@ -2753,6 +2762,118 @@ mod tests {
         eq.result
     }
 
+    #[allow(unused)]
+    fn array_allclose_impl(
+        data1_ptr: *const (),
+        data2_ptr: *const (),
+        dtype: &Dtype,
+        shape: &[usize],
+        strides1: &[isize],
+        strides2: &[isize],
+        equal_nan: bool,
+        rtol: f64,
+        atol: f64,
+    ) -> bool {
+        struct ArrayAllClose {
+            equal_nan: bool,
+            rtol: f64,
+            atol: f64,
+            result: bool,
+        }
+        impl BinaryOp for ArrayAllClose {
+            fn i8(&mut self, ptr1: *mut i8, ptr2: *mut i8, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn i16(&mut self, ptr1: *mut i16, ptr2: *mut i16, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn i32(&mut self, ptr1: *mut i32, ptr2: *mut i32, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn i64(&mut self, ptr1: *mut i64, ptr2: *mut i64, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn u8(&mut self, ptr1: *mut u8, ptr2: *mut u8, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn u16(&mut self, ptr1: *mut u16, ptr2: *mut u16, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn u32(&mut self, ptr1: *mut u32, ptr2: *mut u32, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn u64(&mut self, ptr1: *mut u64, ptr2: *mut u64, _idx: &[usize]) {
+                self.result &= unsafe { ptr1.read() == ptr2.read() };
+            }
+            fn f16(&mut self, ptr1: *mut f16, ptr2: *mut f16, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                cfg_if::cfg_if! { if #[cfg(feature = "half")] {
+                    let eq = self.cmp(val1.to_f64(), val2.to_f64());
+                } else {
+                    let eq = val1.to_bits() == val2.to_bits();
+                } }
+                self.result &= eq;
+            }
+            fn f32(&mut self, ptr1: *mut f32, ptr2: *mut f32, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= self.cmp(val1 as f64, val2 as f64);
+            }
+            fn f64(&mut self, ptr1: *mut f64, ptr2: *mut f64, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= self.cmp(val1, val2);
+            }
+            fn complex_f32(
+                &mut self,
+                ptr1: *mut Complex<f32>,
+                ptr2: *mut Complex<f32>,
+                _idx: &[usize],
+            ) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= self.cmp(val1.re as f64, val2.re as f64);
+                self.result &= self.cmp(val1.im as f64, val2.im as f64);
+            }
+            fn complex_f64(
+                &mut self,
+                ptr1: *mut Complex<f64>,
+                ptr2: *mut Complex<f64>,
+                _idx: &[usize],
+            ) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= self.cmp(val1.re as f64, val2.re as f64);
+                self.result &= self.cmp(val1.im as f64, val2.im as f64);
+            }
+            fn bool(&mut self, ptr1: *mut bool, ptr2: *mut bool, _idx: &[usize]) {
+                let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
+                self.result &= val1 == val2;
+            }
+        }
+        impl ArrayAllClose {
+            fn cmp(&self, a: f64, b: f64) -> bool {
+                (a - b).abs() <= (self.atol + self.rtol * b.abs())
+                    || (self.equal_nan && a.is_nan() && b.is_nan())
+            }
+        }
+
+        let mut op = ArrayAllClose {
+            equal_nan,
+            atol,
+            rtol,
+            result: true,
+        };
+        unsafe {
+            binary_op(
+                data1_ptr.cast_mut(),
+                data2_ptr.cast_mut(),
+                shape,
+                strides1,
+                strides2,
+                dtype,
+                &mut op,
+            )
+        };
+        op.result
+    }
+
     struct ArrayIter<'a> {
         shape: &'a [usize],
         // strides in bytes
@@ -2822,7 +2943,7 @@ mod tests {
 
         use rand::prelude::*;
 
-        use crate::nd::tests::array_equal_impl;
+        use crate::nd::tests::{array_allclose_impl, array_equal_impl};
         use crate::nd::{Dtype, DtypeScalarKind, Dtyped};
 
         pub(crate) fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
@@ -2890,6 +3011,53 @@ mod tests {
                     .map(|&s| s * std::mem::size_of::<T>() as isize)
                     .collect::<Vec<_>>(),
                 true,
+            )
+        }
+
+        macro_rules! assert_arr_allclose {
+            ($left:expr, $right:expr, $rtol:expr, $atol:expr $(,)?) => {{
+                assert!(crate::nd::tests::ndarray_allclose($left, $right, $rtol, $atol), "{:?} != {:?}", $left, $right)
+            }};
+            ($left:expr, $right:expr, $rtol:expr, $atol:expr, $($arg:tt)*) => {{
+                assert!(crate::nd::tests::ndarray_allclose($left, $right, $rtol, $atol), $($arg)+)
+            }};
+        }
+        pub(crate) use assert_arr_allclose;
+
+        pub(crate) fn ndarray_allclose<S1, S2, D1, D2, T>(
+            arr1: &ndarray::ArrayBase<S1, D1>,
+            arr2: &ndarray::ArrayBase<S2, D2>,
+            rtol: f64,
+            atol: f64,
+        ) -> bool
+        where
+            S1: ndarray::Data<Elem = T>,
+            S2: ndarray::Data<Elem = T>,
+            D1: ndarray::Dimension,
+            D2: ndarray::Dimension,
+            T: Dtyped,
+        {
+            if arr1.shape() != arr2.shape() {
+                return false;
+            }
+            array_allclose_impl(
+                arr1.as_ptr().cast(),
+                arr2.as_ptr().cast(),
+                &T::dtype(),
+                arr1.shape(),
+                &arr1
+                    .strides()
+                    .iter()
+                    .map(|&s| s * std::mem::size_of::<T>() as isize)
+                    .collect::<Vec<_>>(),
+                &arr2
+                    .strides()
+                    .iter()
+                    .map(|&s| s * std::mem::size_of::<T>() as isize)
+                    .collect::<Vec<_>>(),
+                true,
+                rtol,
+                atol,
             )
         }
 
