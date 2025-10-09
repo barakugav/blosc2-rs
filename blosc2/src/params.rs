@@ -32,23 +32,32 @@ pub enum Filter {
     /// `[1_1, 2_1, ..., N_1, 1_2, 2_2, ..., N_2, ..., 1_S, 2_S, ..., N_S]`,
     /// where `i_j` is the j-th byte of the i-th element.
     ByteShuffle,
+
     /// Bit shuffle filter.
     ///
     /// Similar to `ByteShuffle`, but operates on bits instead of bytes.
     BitShuffle,
+
     /// Delta filter.
     ///
     /// This filter encodes the data as differences between consecutive elements.
+    ///
+    /// The C library seems to have some issues with this filter, and some bugs are known to exist.
+    /// For now, it is recommended to avoid using this filter until the issues are resolved.
+    /// See for example https://github.com/Blosc/c-blosc2/issues/701
     Delta,
+
     /// Truncation precision filter for floating point data.
     ///
-    /// This filter reduces the precision of floating point numbers by truncating the least
+    /// This filter reduces the precision of floating point numbers by truncating (zeros) the least
     /// significant bits.
     ///
     /// This filter is only supported for floating point types (e.g., `f32`, `f64`). This can not
-    /// be enforced by the library, there it is only checked that the typesize is 4 or 8 bytes.
+    /// be enforced by the library, there it is only a check that the typesize is 4 or 8 bytes.
+    ///
+    /// The C library seems to have some issues when this filter is used together with `ByteShuffle`.
     TruncPrecision {
-        /// The number of bits to truncate.
+        /// The number of bits to keep.
         ///
         /// Positive value will set absolute precision bits, whereas negative
         /// value will reduce the precision bits (similar to Python slicing convention).
@@ -192,8 +201,12 @@ impl CParams {
             crate::trace!("Too many filters, maximum is 6");
             return Err(Error::InvalidParam);
         }
-        if filters.len() > 2 {
-            println!("Warning, more than two filters was not tested and seems buggy!")
+        if filters
+            .iter()
+            .any(|f| matches!(f, Filter::TruncPrecision { .. }))
+            && filters.iter().any(|f| matches!(f, Filter::ByteShuffle))
+        {
+            println!("Warning, using both the trunc precision filter and byte shuffle seems buggy!")
         }
         self.0.filters = [blosc2_sys::BLOSC_NOFILTER as _; 6];
         self.0.filters_meta = [0; 6];
@@ -201,7 +214,11 @@ impl CParams {
             let (filter, meta) = match filter {
                 Filter::ByteShuffle => (blosc2_sys::BLOSC_SHUFFLE, 0),
                 Filter::BitShuffle => (blosc2_sys::BLOSC_BITSHUFFLE, 0),
-                Filter::Delta => (blosc2_sys::BLOSC_DELTA, 0),
+                Filter::Delta => {
+                    // TODO: https://github.com/Blosc/c-blosc2/issues/701
+                    println!("Warning, the delta filter seems buggy in c-blosc2!");
+                    (blosc2_sys::BLOSC_DELTA, 0)
+                }
                 Filter::TruncPrecision { prec_bits } => {
                     (blosc2_sys::BLOSC_TRUNC_PREC, *prec_bits as u8)
                 }
