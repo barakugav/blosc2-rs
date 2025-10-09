@@ -44,7 +44,7 @@ pub enum Filter {
     ///
     /// The C library seems to have some issues with this filter, and some bugs are known to exist.
     /// For now, it is recommended to avoid using this filter until the issues are resolved.
-    /// See for example https://github.com/Blosc/c-blosc2/issues/701
+    /// See for example <https://github.com/Blosc/c-blosc2/issues/701>
     Delta,
 
     /// Truncation precision filter for floating point data.

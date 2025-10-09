@@ -3,6 +3,11 @@ use std::path::PathBuf;
 fn main() {
     generate_bindings();
 
+    if std::env::var("DOCS_RS").is_ok() {
+        // Skip building and linking to the static libraries when building documentation
+        return;
+    }
+
     // Build and link
     let lib_name = build_c_lib();
     println!("cargo::rustc-link-lib=static={lib_name}");
