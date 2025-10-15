@@ -16,14 +16,14 @@ categories = ["compression", "external-ffi-bindings"]
 blosc2-sys = { package = "blosc2-rs-sys", path = "../blosc2-sys", version = "0.1.5" }
 libc = "0.2"
 cfg-if = "1.0.0"
-ndarray = { version = "0.16.1", default-features = false, optional = true }
+ndarray = { version = ">=0.16.1, <0.18.0", default-features = false, optional = true }
 half = { version = "2.4", default-features = false, optional = true }
 num-complex = { version = "0.4", default-features = false, optional = true }
 
 [dev-dependencies]
 rand = "0.9"
-tempfile = "3.13"
-ndarray = { version = "0.16.1", features = ["std"] }
+tempfile = "3"
+ndarray = { version = ">=0.16.1, <0.18.0", features = ["std"] }
 
 [features]
 default = ["ndarray"]
