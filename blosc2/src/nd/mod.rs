@@ -2637,7 +2637,7 @@ mod tests {
     }
 
     fn rand_chunk_block_shapes(shape: &[usize], rand: &mut impl Rng) -> (Vec<usize>, Vec<usize>) {
-        let log2 = |x: usize| (usize::BITS as usize - x.leading_zeros() as usize);
+        let log2 = |x: usize| usize::BITS as usize - x.leading_zeros() as usize;
         let chunkshape = shape
             .iter()
             .map(|s| 1 << rand.random_range(0..log2(*s)))
