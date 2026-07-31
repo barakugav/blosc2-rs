@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Cargo
+  - package-ecosystem: cargo
+    directories:
+      - /blosc2
+      - /blosc2-sys
+    schedule:
+      interval: monthly
+    groups:
+      rust-patch-updates:
+        update-types:
+          - patch
+
+  # Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
