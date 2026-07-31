@@ -21,7 +21,7 @@ half = { version = "2.4", default-features = false, optional = true }
 num-complex = { version = "0.4", default-features = false, optional = true }
 
 [dev-dependencies]
-rand = "0.9"
+rand = "0.10"
 tempfile = "3"
 ndarray = { version = ">=0.16.1, <0.18.0", features = ["std"] }
 
