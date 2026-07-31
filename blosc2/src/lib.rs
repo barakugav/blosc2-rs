@@ -1,5 +1,4 @@
-#![cfg_attr(deny_warnings, deny(warnings))]
-#![cfg_attr(deny_warnings, deny(missing_docs))]
+#![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 //! Rust bindings for blosc2 - a fast, compressed, persistent binary data store library.

@@ -1,3 +1,2 @@
 [env]
-BLOSC2_RS_DENY_WARNINGS = { value = "1" }
 BLOSC_TRACE = "1"
