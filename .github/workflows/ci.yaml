@@ -64,29 +64,25 @@ jobs:
           RUSTFLAGS: "-D warnings"
 
       - name: Clippy blosc2-sys (without features)
-        uses: auguwu/clippy-action@1.4.0
-        with:
-          working-directory: blosc2-sys
-          check-args: --no-default-features
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo clippy --no-default-features
+        working-directory: blosc2-sys
+        env:
+          RUSTFLAGS: "-D warnings"
       - name: Clippy blosc2-sys (with features)
-        uses: auguwu/clippy-action@1.4.0
-        with:
-          working-directory: blosc2-sys
-          check-args: --all-features
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo clippy --all-features
+        working-directory: blosc2-sys
+        env:
+          RUSTFLAGS: "-D warnings"
       - name: Clippy blosc2 (without features)
-        uses: auguwu/clippy-action@1.4.0
-        with:
-          working-directory: blosc2
-          check-args: --no-default-features
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo clippy --no-default-features
+        working-directory: blosc2
+        env:
+          RUSTFLAGS: "-D warnings"
       - name: Clippy blosc2 (with features)
-        uses: auguwu/clippy-action@1.4.0
-        with:
-          working-directory: blosc2
-          check-args: --all-features
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo clippy --all-features
+        working-directory: blosc2
+        env:
+          RUSTFLAGS: "-D warnings"
 
       - name: Test blosc2-sys dev
         run: cargo test --all-features --profile dev
@@ -146,11 +142,10 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
       - name: cargo clippy blosc2
-        uses: auguwu/clippy-action@1.4.0
-        with:
-          working-directory: blosc2
-          check-args: --all-features
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo clippy --all-features
+        working-directory: blosc2
+        env:
+          RUSTFLAGS: "-D warnings"
 
       - name: cargo check blosc2-sys
         run: cargo check --all-features
@@ -158,8 +153,7 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
       - name: cargo clippy blosc2-sys
-        uses: auguwu/clippy-action@1.4.0
-        with:
-          working-directory: blosc2-sys
-          check-args: --all-features
-          token: ${{ secrets.GITHUB_TOKEN }}
+        run: cargo clippy --all-features
+        working-directory: blosc2-sys
+        env:
+          RUSTFLAGS: "-D warnings"
