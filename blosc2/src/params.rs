@@ -229,7 +229,7 @@ impl CParams {
         Ok(self)
     }
     /// Get the filters currently set in the parameters.
-    pub fn get_filters(&self) -> impl Iterator<Item = Filter> {
+    pub fn get_filters(&self) -> impl Iterator<Item = Filter> + use<> {
         let filters = self.0.filters;
         let filters_meta = self.0.filters_meta;
         filters

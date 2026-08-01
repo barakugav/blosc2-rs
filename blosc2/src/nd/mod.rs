@@ -16,7 +16,7 @@ use std::ptr::NonNull;
 
 use crate::chunk::{SChunk, SChunkOpenOptions, SChunkStorageParams};
 use crate::error::{Error, ErrorCode};
-use crate::util::{path2cstr, ArrayVec, CowVec};
+use crate::util::{ArrayVec, CowVec, path2cstr};
 use crate::{CParams, DParams};
 
 /// The maximum number of dimensions for an Ndarray.
@@ -638,7 +638,7 @@ impl NdarrayInitValue {
     where
         T: Dtyped,
     {
-        Self::uninit_of(T::dtype())
+        unsafe { Self::uninit_of(T::dtype()) }
     }
 
     /// An uninitialized value of the given dtype.
@@ -818,10 +818,12 @@ impl Ndarray {
         let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
         unsafe { buf.set_len(buf_len) };
 
-        self.to_items_bytes_into(std::slice::from_raw_parts_mut(
-            buf.as_mut_ptr().cast(),
-            buf_len * std::mem::size_of::<T>(),
-        ))?;
+        self.to_items_bytes_into(unsafe {
+            std::slice::from_raw_parts_mut(
+                buf.as_mut_ptr().cast(),
+                buf_len * std::mem::size_of::<T>(),
+            )
+        })?;
         let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
 
         let ndim = self.ndim();
@@ -1027,13 +1029,12 @@ impl Ndarray {
         let mut buf = Vec::<MaybeUninit<T>>::with_capacity(buf_len);
         unsafe { buf.set_len(buf_len) };
 
-        self.slice_buf_into(
-            slice,
+        self.slice_buf_into(slice, unsafe {
             std::slice::from_raw_parts_mut(
                 buf.as_mut_ptr().cast(),
                 buf_len * std::mem::size_of::<T>(),
-            ),
-        )?;
+            )
+        })?;
         let buf = unsafe { std::mem::transmute::<Vec<MaybeUninit<T>>, Vec<T>>(buf) };
 
         let ndim = self.ndim();
@@ -1568,13 +1569,13 @@ mod tests {
 
     use super::{Ndarray, NdarrayInitValue, NdarrayParams};
     use crate::nd::{
-        Dtype, DtypeKind, DtypeScalarKind, InitValueInner, SChunkOpenOptions, SChunkStorageParams,
-        MAX_DIM,
+        Dtype, DtypeKind, DtypeScalarKind, InitValueInner, MAX_DIM, SChunkOpenOptions,
+        SChunkStorageParams,
     };
     use crate::util::tests::{
         ceil_to_multiple, rand_cparams, rand_cparams_with_itemsize, rand_dparams,
     };
-    use crate::util::{f16, Complex, MmapMode};
+    use crate::util::{Complex, MmapMode, f16};
 
     #[cfg(feature = "ndarray")]
     use super::Dtyped;
@@ -1658,9 +1659,11 @@ mod tests {
             match value.value {
                 InitValueInner::Zero => assert!(array_data.iter().all(|&b| b == 0)),
                 InitValueInner::Uninit => {}
-                InitValueInner::Value(items) => assert!(array_data
-                    .chunks_exact(dtype.itemsize())
-                    .all(|chunk| chunk == items)),
+                InitValueInner::Value(items) => assert!(
+                    array_data
+                        .chunks_exact(dtype.itemsize())
+                        .all(|chunk| chunk == items)
+                ),
                 InitValueInner::Nan => unreachable!(),
             }
         }
@@ -1843,10 +1846,12 @@ mod tests {
 
             let array = match (offset, mmap) {
                 (0, None) => Ndarray::open(&path).unwrap(),
-                (_, _) => Ndarray::open_with_options(&path, unsafe {
-                    SChunkOpenOptions::new().offset(offset).mmap(mmap)
-                })
-                .unwrap(),
+                (_, _) => {
+                    let mut options = SChunkOpenOptions::new();
+                    options.offset(offset);
+                    unsafe { options.mmap(mmap) };
+                    Ndarray::open_with_options(&path, &options).unwrap()
+                }
             };
 
             assert_eq!(
@@ -2598,9 +2603,11 @@ mod tests {
             }
             assert_eq!(dtype.itemsize() % repeated, 0);
             let base_itemsize = dtype.itemsize() / repeated;
-            assert!(inner_fields
-                .iter()
-                .all(|(_kind, offset)| (0..base_itemsize).contains(offset)));
+            assert!(
+                inner_fields
+                    .iter()
+                    .all(|(_kind, offset)| (0..base_itemsize).contains(offset))
+            );
             inner_fields = (0..repeated)
                 .flat_map(|r| {
                     let base_offset = r * base_itemsize;

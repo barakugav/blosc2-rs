@@ -2,8 +2,8 @@ use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-use crate::util::FfiVec;
 use crate::CompressAlgo;
+use crate::util::FfiVec;
 
 /// Get a list of compressors names supported in the current build.
 pub fn list_compressors() -> impl Iterator<Item = &'static str> {

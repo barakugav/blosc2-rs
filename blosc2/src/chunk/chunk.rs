@@ -3,7 +3,7 @@ use std::mem::MaybeUninit;
 
 use crate::chunk::Decoder;
 use crate::error::ErrorCode;
-use crate::util::{validate_compressed_buf_and_get_sizes, CowVec};
+use crate::util::{CowVec, validate_compressed_buf_and_get_sizes};
 use crate::{DParams, Error};
 
 /// A chunk of compressed data.
@@ -285,9 +285,9 @@ pub(crate) mod tests {
 
     use rand::prelude::*;
 
+    use crate::CParams;
     use crate::chunk::{Chunk, Encoder};
     use crate::util::tests::{rand_cparams, rand_dparams, rand_src_len};
-    use crate::CParams;
 
     #[test]
     fn get_item() {

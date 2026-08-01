@@ -24,7 +24,7 @@ impl Encoder {
     }
 
     pub(crate) fn ctx_ptr(&self) -> *mut blosc2_sys::blosc2_context {
-        self.0 .0.as_ptr()
+        self.0.0.as_ptr()
     }
 
     /// Compress the given bytes into a new allocated `Chunk`.
@@ -241,7 +241,7 @@ impl Decoder {
     }
 
     pub(crate) fn ctx_ptr(&self) -> *mut blosc2_sys::blosc2_context {
-        self.0 .0.as_ptr()
+        self.0.0.as_ptr()
     }
 
     /// Decompress the given bytes into a new allocated `Vec<u8>`.

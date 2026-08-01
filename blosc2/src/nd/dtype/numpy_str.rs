@@ -1,6 +1,6 @@
 use std::{borrow::Cow, collections::HashMap, fmt::Write, num::ParseIntError};
 
-use crate::nd::dtype::ast::{parse_ast, Node};
+use crate::nd::dtype::ast::{Node, parse_ast};
 use crate::nd::dtype::ceil_to_multiple;
 use crate::nd::{Dtype, DtypeError, DtypeKind, DtypeScalarKind, Endianness};
 
@@ -64,7 +64,7 @@ fn parse_scalar_dtype(s: &str) -> Result<Dtype, DtypeParseError> {
         ('c', _) => return Err(DtypeParseError::new(DtypeParseErrorKind::UnsupportedScalar)),
         ('b', 1) | ('?', 1) => (DtypeScalarKind::Bool, 1),
         ('b', _) | ('?', _) => {
-            return Err(DtypeParseError::new(DtypeParseErrorKind::UnsupportedScalar))
+            return Err(DtypeParseError::new(DtypeParseErrorKind::UnsupportedScalar));
         }
         (_, _) => return Err(DtypeParseError::new(DtypeParseErrorKind::UnsupportedScalar)),
     };
@@ -134,7 +134,7 @@ fn ast2dtype(ast: Node) -> Result<Dtype, DtypeParseError> {
                     _ => {
                         return Err(DtypeParseError::msg(
                             "Expected 2- or 3-tuple for field definition",
-                        ))
+                        ));
                     }
                 };
                 let name = name.expect_str().context("field name")?;
@@ -634,14 +634,8 @@ mod tests {
                     itemsize: 12,
                     kind: DtypeKind::Struct {
                         fields: HashMap::from([
-                            (
-                                "a".to_string(),
-                                (0, sdtype(SKind::I32)),
-                            ),
-                            (
-                                "b".to_string(),
-                                (4, sdtype(SKind::F64)),
-                            ),
+                            ("a".to_string(), (0, sdtype(SKind::I32))),
+                            ("b".to_string(), (4, sdtype(SKind::F64))),
                         ]),
                     },
                     alignment: 1,
@@ -652,14 +646,8 @@ mod tests {
                 Dtype {
                     kind: DtypeKind::Struct {
                         fields: HashMap::from([
-                            (
-                                "a".to_string(),
-                                (0, sdtype(SKind::I32)),
-                            ),
-                            (
-                                "b".to_string(),
-                                (8, sdtype(SKind::F64)),
-                            ),
+                            ("a".to_string(), (0, sdtype(SKind::I32))),
+                            ("b".to_string(), (8, sdtype(SKind::F64))),
                         ]),
                     },
                     shape: vec![],
@@ -672,14 +660,8 @@ mod tests {
                 Dtype {
                     kind: DtypeKind::Struct {
                         fields: HashMap::from([
-                            (
-                                "a".to_string(),
-                                (0, sdtype(SKind::I32)),
-                            ),
-                            (
-                                "b".to_string(),
-                                (8, sdtype(SKind::F64)),
-                            ),
+                            ("a".to_string(), (0, sdtype(SKind::I32))),
+                            ("b".to_string(), (8, sdtype(SKind::F64))),
                         ]),
                     },
                     shape: vec![],
@@ -692,17 +674,17 @@ mod tests {
                 Dtype {
                     kind: DtypeKind::Struct {
                         fields: HashMap::from([
-                            (
-                                "a".to_string(),
-                                (0, sdtype(SKind::I32))
-                            ),
+                            ("a".to_string(), (0, sdtype(SKind::I32))),
                             (
                                 "b".to_string(),
-                                (4, Dtype {
-                                    shape: vec![2, 3, 4],
-                                    itemsize: 192,
-                                    ..sdtype(SKind::F64)
-                                }),
+                                (
+                                    4,
+                                    Dtype {
+                                        shape: vec![2, 3, 4],
+                                        itemsize: 192,
+                                        ..sdtype(SKind::F64)
+                                    },
+                                ),
                             ),
                         ]),
                     },
@@ -716,17 +698,17 @@ mod tests {
                 Dtype {
                     kind: DtypeKind::Struct {
                         fields: HashMap::from([
-                            (
-                                "a".to_string(),
-                                (0, sdtype(SKind::I32))
-                            ),
+                            ("a".to_string(), (0, sdtype(SKind::I32))),
                             (
                                 "b".to_string(),
-                                (8, Dtype {
-                                    shape: vec![2, 3, 4],
-                                    itemsize: 192,
-                                    ..sdtype(SKind::F64)
-                                }),
+                                (
+                                    8,
+                                    Dtype {
+                                        shape: vec![2, 3, 4],
+                                        itemsize: 192,
+                                        ..sdtype(SKind::F64)
+                                    },
+                                ),
                             ),
                         ]),
                     },
@@ -740,17 +722,17 @@ mod tests {
                 Dtype {
                     kind: DtypeKind::Struct {
                         fields: HashMap::from([
-                            (
-                                "a".to_string(),
-                                (0, sdtype(SKind::I32))
-                            ),
+                            ("a".to_string(), (0, sdtype(SKind::I32))),
                             (
                                 "b".to_string(),
-                                (8, Dtype {
-                                    shape: vec![2, 3, 4],
-                                    itemsize: 192,
-                                    ..sdtype(SKind::F64)
-                                }),
+                                (
+                                    8,
+                                    Dtype {
+                                        shape: vec![2, 3, 4],
+                                        itemsize: 192,
+                                        ..sdtype(SKind::F64)
+                                    },
+                                ),
                             ),
                         ]),
                     },

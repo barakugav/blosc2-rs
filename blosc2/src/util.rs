@@ -10,8 +10,8 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::path::Path;
 use std::ptr::NonNull;
 
-use crate::error::ErrorCode;
 use crate::Error;
+use crate::error::ErrorCode;
 
 /// A vector similar to `Vec<T>`, but allocated using C's `malloc` and freed using `free`.
 ///
