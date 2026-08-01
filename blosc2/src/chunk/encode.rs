@@ -18,6 +18,8 @@ pub struct Encoder(Context);
 impl Encoder {
     /// Create a new `Encoder` with the given compression parameters.
     pub fn new(params: CParams) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let ctx = unsafe { blosc2_sys::blosc2_create_cctx(params.0) };
         let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
         Ok(Self(Context(ctx)))
@@ -235,6 +237,8 @@ pub struct Decoder(Context);
 impl Decoder {
     /// Create a new `Decoder` with the given decompression parameters.
     pub fn new(params: DParams) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let ctx = unsafe { blosc2_sys::blosc2_create_dctx(params.0) };
         let ctx = NonNull::new(ctx).ok_or(Error::Failure)?;
         Ok(Self(Context(ctx)))

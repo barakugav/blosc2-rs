@@ -81,6 +81,7 @@ pub enum SplitMode {
 pub struct CParams(pub(crate) blosc2_sys::blosc2_cparams);
 impl Default for CParams {
     fn default() -> Self {
+        crate::global::global_init();
         Self(unsafe { blosc2_sys::blosc2_get_blosc2_cparams_defaults() })
     }
 }
@@ -268,6 +269,7 @@ impl std::fmt::Debug for CParams {
 pub struct DParams(pub(crate) blosc2_sys::blosc2_dparams);
 impl Default for DParams {
     fn default() -> Self {
+        crate::global::global_init();
         Self(unsafe { blosc2_sys::blosc2_get_blosc2_dparams_defaults() })
     }
 }

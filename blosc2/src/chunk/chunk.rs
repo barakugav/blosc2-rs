@@ -62,6 +62,8 @@ impl<'a> Chunk<'a> {
     ///
     /// This function is very cheap.
     pub fn from_compressed(bytes: CowVec<'a, u8>) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let (nbytes, _cbytes, _blocksize) =
             validate_compressed_buf_and_get_sizes(bytes.as_slice())?;
 

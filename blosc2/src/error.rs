@@ -169,8 +169,12 @@ impl Error {
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        crate::global::global_init();
+
         let err_str = unsafe { blosc2_sys::blosc2_error_string(self.to_int()) };
-        assert!(!err_str.is_null());
+        if err_str.is_null() {
+            return f.write_str("blosc2: unknown error");
+        }
         let len = unsafe { libc::strlen(err_str) };
         let err_str: &'static [u8] = unsafe { std::slice::from_raw_parts(err_str.cast(), len + 1) };
         let err_str = std::ffi::CStr::from_bytes_with_nul(err_str).unwrap();

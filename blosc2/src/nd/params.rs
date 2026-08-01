@@ -101,6 +101,8 @@ impl Ctx {
         dtype: &CStr,
         dtype_format: i8,
     ) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let ndim = shape.len();
         if chunkshape.len() != ndim || blockshape.len() != ndim {
             crate::trace!(

@@ -92,7 +92,7 @@ impl SChunk {
     ) -> Result<Self, Error> {
         crate::global::global_init();
 
-        let urlpath = storage.urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr).transpose()?;
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
@@ -118,7 +118,7 @@ impl SChunk {
     pub fn open_with_options(urlpath: &Path, options: &SChunkOpenOptions) -> Result<Self, Error> {
         crate::global::global_init();
 
-        let urlpath = path2cstr(urlpath);
+        let urlpath = path2cstr(urlpath)?;
         let schunk = match &options.mmap {
             None => unsafe {
                 blosc2_sys::blosc2_schunk_open_offset(urlpath.as_ptr(), options.offset as _)
@@ -145,6 +145,8 @@ impl SChunk {
 
     /// Create a super chunk from an existing in-memory buffer.
     pub fn from_buffer(buffer: CowVec<u8>) -> Result<Self, Error> {
+        crate::global::global_init();
+
         let buffer = BytesMaybePassOwnershipToC::new(buffer);
         let schunk = unsafe {
             blosc2_sys::blosc2_schunk_from_buffer(
@@ -185,7 +187,7 @@ impl SChunk {
     /// * `append` - If true, the super chunk will be appended to the file. If false, the file
     ///   should not exist, otherwise an error will be returned.
     pub fn to_file(&mut self, urlpath: &Path, append: bool) -> Result<(), Error> {
-        let urlpath = path2cstr(urlpath);
+        let urlpath = path2cstr(urlpath)?;
         unsafe {
             if append {
                 blosc2_sys::blosc2_schunk_append_file(self.0.as_ptr(), urlpath.as_ptr().cast_mut())
@@ -389,7 +391,7 @@ impl SChunk {
     ) -> Result<SChunk, Error> {
         crate::global::global_init();
 
-        let urlpath = storage.urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr).transpose()?;
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())

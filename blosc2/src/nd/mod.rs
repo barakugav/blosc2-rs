@@ -118,7 +118,7 @@ impl Ndarray {
 
         crate::global::global_init();
 
-        let urlpath = storage.urlpath.map(path2cstr);
+        let urlpath = storage.urlpath.map(path2cstr).transpose()?;
         let urlpath = urlpath
             .as_ref()
             .map(|p| p.as_ptr().cast_mut())
@@ -1498,7 +1498,9 @@ impl Ndarray {
     ///
     /// The offset of the saved array in the file.
     pub fn save(&self, urlpath: &Path, append: bool) -> Result<u64, Error> {
-        let urlpath = path2cstr(urlpath);
+        crate::global::global_init();
+
+        let urlpath = path2cstr(urlpath)?;
         let offset = if !append {
             unsafe { blosc2_sys::b2nd_save(self.as_ptr(), urlpath.as_ptr().cast_mut()) }
                 .into_result()?;
@@ -1909,7 +1911,7 @@ mod tests {
                 let storage = rand_storage(rand);
                 let array_orig = rand_ndarray::<T>(&shape, rand);
                 let array =
-                    Ndarray::from_ndarray_at(&array_orig, storage.params(), &params).unwrap();
+                    Ndarray::from_ndarray_at(&array_orig, storage.params(), params).unwrap();
 
                 for _ in 0..30 {
                     let idx = shape
@@ -2763,16 +2765,26 @@ mod tests {
     }
 
     #[allow(unused)]
-    fn array_allclose_impl(
-        data1_ptr: *const (),
-        data2_ptr: *const (),
-        dtype: &Dtype,
-        shape: &[usize],
-        strides1: &[isize],
-        strides2: &[isize],
+    struct RawArrayView<'a> {
+        data_ptr: *const (),
+        shape: &'a [usize],
+        // strides in bytes
+        strides: &'a [isize],
+    }
+
+    #[allow(unused)]
+    struct AllCloseConfig {
         equal_nan: bool,
         rtol: f64,
         atol: f64,
+    }
+
+    #[allow(unused)]
+    fn array_allclose_impl(
+        view1: RawArrayView<'_>,
+        view2: RawArrayView<'_>,
+        dtype: &Dtype,
+        config: AllCloseConfig,
     ) -> bool {
         struct ArrayAllClose {
             equal_nan: bool,
@@ -2839,8 +2851,8 @@ mod tests {
                 _idx: &[usize],
             ) {
                 let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
-                self.result &= self.cmp(val1.re as f64, val2.re as f64);
-                self.result &= self.cmp(val1.im as f64, val2.im as f64);
+                self.result &= self.cmp(val1.re, val2.re);
+                self.result &= self.cmp(val1.im, val2.im);
             }
             fn bool(&mut self, ptr1: *mut bool, ptr2: *mut bool, _idx: &[usize]) {
                 let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
@@ -2855,18 +2867,18 @@ mod tests {
         }
 
         let mut op = ArrayAllClose {
-            equal_nan,
-            atol,
-            rtol,
+            equal_nan: config.equal_nan,
+            atol: config.atol,
+            rtol: config.rtol,
             result: true,
         };
         unsafe {
             binary_op(
-                data1_ptr.cast_mut(),
-                data2_ptr.cast_mut(),
-                shape,
-                strides1,
-                strides2,
+                view1.data_ptr.cast_mut(),
+                view2.data_ptr.cast_mut(),
+                view1.shape,
+                view1.strides,
+                view2.strides,
                 dtype,
                 &mut op,
             )
@@ -2894,7 +2906,7 @@ mod tests {
             strides: &'a [isize],
         ) -> Self {
             assert_eq!(shape.len(), strides.len());
-            let state = if shape.iter().any(|&s| s == 0) {
+            let state = if shape.contains(&0) {
                 ArrayIterState::Exhausted
             } else {
                 ArrayIterState::First
@@ -2943,7 +2955,7 @@ mod tests {
 
         use rand::prelude::*;
 
-        use crate::nd::tests::{array_allclose_impl, array_equal_impl};
+        use crate::nd::tests::{array_allclose_impl, array_equal_impl, AllCloseConfig, RawArrayView};
         use crate::nd::{Dtype, DtypeScalarKind, Dtyped};
 
         pub(crate) fn rand_ndarray<T>(shape: &[usize], rand: &mut impl Rng) -> ndarray::ArrayD<T>
@@ -3040,24 +3052,34 @@ mod tests {
             if arr1.shape() != arr2.shape() {
                 return false;
             }
+            let dtype = T::dtype();
+            let strides1 = arr1
+                .strides()
+                .iter()
+                .map(|&s| s * std::mem::size_of::<T>() as isize)
+                .collect::<Vec<_>>();
+            let strides2 = arr2
+                .strides()
+                .iter()
+                .map(|&s| s * std::mem::size_of::<T>() as isize)
+                .collect::<Vec<_>>();
             array_allclose_impl(
-                arr1.as_ptr().cast(),
-                arr2.as_ptr().cast(),
-                &T::dtype(),
-                arr1.shape(),
-                &arr1
-                    .strides()
-                    .iter()
-                    .map(|&s| s * std::mem::size_of::<T>() as isize)
-                    .collect::<Vec<_>>(),
-                &arr2
-                    .strides()
-                    .iter()
-                    .map(|&s| s * std::mem::size_of::<T>() as isize)
-                    .collect::<Vec<_>>(),
-                true,
-                rtol,
-                atol,
+                RawArrayView {
+                    data_ptr: arr1.as_ptr().cast(),
+                    shape: arr1.shape(),
+                    strides: &strides1,
+                },
+                RawArrayView {
+                    data_ptr: arr2.as_ptr().cast(),
+                    shape: arr2.shape(),
+                    strides: &strides2,
+                },
+                &dtype,
+                AllCloseConfig {
+                    equal_nan: true,
+                    rtol,
+                    atol,
+                },
             )
         }
 

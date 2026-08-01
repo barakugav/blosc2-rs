@@ -184,6 +184,8 @@ impl Drop for BytesMaybePassOwnershipToC<'_> {
 }
 
 pub(crate) fn validate_compressed_buf_and_get_sizes(src: &[u8]) -> Result<(i32, i32, i32), Error> {
+    crate::global::global_init();
+
     let mut nbytes = MaybeUninit::uninit();
     let mut cbytes = MaybeUninit::uninit();
     let mut blocksize = MaybeUninit::uninit();
@@ -203,10 +205,18 @@ pub(crate) fn validate_compressed_buf_and_get_sizes(src: &[u8]) -> Result<(i32, 
     ))
 }
 
-pub(crate) fn path2cstr(path: &Path) -> CString {
-    path.to_str()
-        .and_then(|p| CString::new(p).ok())
-        .expect("failed to convert path to cstr")
+pub(crate) fn path2cstr(path: &Path) -> Result<CString, Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        CString::new(path.as_os_str().as_bytes()).map_err(|_| Error::InvalidParam)
+    }
+    #[cfg(not(unix))]
+    {
+        path.to_str()
+            .and_then(|p| CString::new(p).ok())
+            .ok_or(Error::InvalidParam)
+    }
 }
 
 pub(crate) struct ArrayVec<T, const N: usize> {
