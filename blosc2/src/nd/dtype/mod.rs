@@ -3,8 +3,8 @@ mod numpy_str;
 
 use std::collections::HashMap;
 
-use crate::nd::dtype::numpy_str::{parse_numpy_dtype_str, DtypeParseError};
-use crate::util::{f16, Complex};
+use crate::nd::dtype::numpy_str::{DtypeParseError, parse_numpy_dtype_str};
+use crate::util::{Complex, f16};
 
 /// Description of a type layout and inner fields.
 ///

@@ -4,7 +4,7 @@ use std::ptr::NonNull;
 
 use crate::chunk::Chunk;
 use crate::error::ErrorCode;
-use crate::util::{path2cstr, BytesMaybePassOwnershipToC, CowVec, MmapMode};
+use crate::util::{BytesMaybePassOwnershipToC, CowVec, MmapMode, path2cstr};
 use crate::{CParams, DParams, Error};
 
 /// A super chunk (SChunk) is a collection of compressed chunks that are treated as a single entity.
@@ -937,10 +937,12 @@ mod tests {
             });
             let mut schunk2 = match (offset, mmap) {
                 (0, None) => SChunk::open(&urlpath).unwrap(),
-                (_, _) => SChunk::open_with_options(&urlpath, unsafe {
-                    SChunkOpenOptions::new().offset(offset).mmap(mmap)
-                })
-                .unwrap(),
+                (_, _) => {
+                    let mut options = SChunkOpenOptions::new();
+                    options.offset(offset);
+                    unsafe { options.mmap(mmap) };
+                    SChunk::open_with_options(&urlpath, &options).unwrap()
+                }
             };
 
             assert_eq_chunks(&mut schunk2, Some(&data_chunks), None);
