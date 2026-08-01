@@ -1,6 +1,6 @@
 [package]
 name = "blosc2"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.85.0"
 authors = ["Barak Ugav <barakugav@gmail.com>"]
@@ -12,7 +12,7 @@ keywords = ["blosc", "blosc2", "bindings", "compression"]
 categories = ["compression", "external-ffi-bindings"]
 
 [dependencies]
-blosc2-sys = { package = "blosc2-rs-sys", path = "../blosc2-sys", version = "0.1.5" }
+blosc2-sys = { package = "blosc2-rs-sys", path = "../blosc2-sys", version = "0.1.6" }
 libc = "0.2"
 cfg-if = "1.0.0"
 ndarray = { version = ">=0.16.1, <0.18.0", default-features = false, optional = true }
