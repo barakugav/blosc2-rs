@@ -17,7 +17,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        runner: [ubuntu-latest, macos-latest, windows-2022]
+        runner: [ubuntu-26.04, macos-26, windows-2025]
     defaults:
       run:
         shell: bash
@@ -31,7 +31,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           submodules: true
       - name: Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: 1.85.0
           components: clippy, rustfmt
@@ -41,6 +41,11 @@ jobs:
       - name: Setup blosc2 lock file
         run: mv Cargo.lock.ci Cargo.lock
         working-directory: blosc2
+      # The image ships several LLVM versions. bindgen loads the newest libclang but takes its
+      # headers from the default `clang`, which is older, and the two don't mix.
+      - name: Use clang matching libclang
+        if: runner.os == 'Linux'
+        run: echo "CLANG_PATH=$(ls -d /usr/lib/llvm-* | sort -V | tail -1)/bin/clang" >> "$GITHUB_ENV"
 
       - name: Build blosc2-sys (without features)
         run: cargo build --no-default-features
@@ -104,7 +109,7 @@ jobs:
     # check that we can build using different rust versions:
     # - the minimal rust version that is specified by this crate
     # - the latest stable version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         rust-version: ["msrv", "stable"]
@@ -124,8 +129,11 @@ jobs:
           echo "Rust version: '$rust_version'"
           echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
         working-directory: blosc2-sys
+      # See the same step in the `ci` job.
+      - name: Use clang matching libclang
+        run: echo "CLANG_PATH=$(ls -d /usr/lib/llvm-* | sort -V | tail -1)/bin/clang" >> "$GITHUB_ENV"
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           toolchain: ${{ steps.rust-version.outputs.rust_version }}
           components: clippy

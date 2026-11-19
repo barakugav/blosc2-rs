@@ -82,11 +82,11 @@ extern "C" {
 
 /* Version numbers */
 #define BLOSC2_VERSION_MAJOR    2    /* for major interface/format changes  */
-#define BLOSC2_VERSION_MINOR    21   /* for minor interface/format changes  */
-#define BLOSC2_VERSION_RELEASE  3    /* for tweaks, bug-fixes, or development */
+#define BLOSC2_VERSION_MINOR    23   /* for minor interface/format changes  */
+#define BLOSC2_VERSION_RELEASE  1   /* for tweaks, bug-fixes, or development */
 
-#define BLOSC2_VERSION_STRING   "2.21.3"  /* string version.  Sync with above! */
-#define BLOSC2_VERSION_DATE     "$Date:: 2025-09-24 #$"    /* date version year-month-day */
+#define BLOSC2_VERSION_STRING   "2.23.1"  /* string version.  Sync with above! */
+#define BLOSC2_VERSION_DATE     "$Date:: 2026-03-03 #$"    /* date version year-month-day */
 
 
 /* The maximum number of dimensions for Blosc2 NDim arrays */
@@ -250,12 +250,12 @@ enum {
   BLOSC_NOFILTER = 0,
   //!< No filter.
   BLOSC_SHUFFLE = 1,
-  //!< Byte-wise shuffle. `filters_meta` does not have any effect here.
+  //!< Byte-wise shuffle. `filters_meta` is the number of bytestreams to shuffle from the input. If 0, defaults to typesize.
   BLOSC_BITSHUFFLE = 2,
-  //!< Bit-wise shuffle. `filters_meta` does not have any effect here.
+  //!< Bit-wise shuffle. `filters_meta` does not have any effect.
 #endif // BLOSC_H
   BLOSC_DELTA = 3,
-  //!< Delta filter. `filters_meta` does not have any effect here.
+  //!< Delta filter (bitwise XOR relative to reference). `filters_meta` does not have any effect.
   BLOSC_TRUNC_PREC = 4,
   //!< Truncate mantissa precision.
   //!< Positive values in `filters_meta` will keep bits; negative values will zero bits.
@@ -1111,6 +1111,7 @@ typedef struct {
   uint8_t *ttmp;  // a temporary that is able to hold several blocks for the output and is private for each thread
   size_t ttmp_nbytes;  // the size of the temporary in bytes
   blosc2_context *ctx;  // the compression context
+  bool output_is_disposable;  // whether the output buffer is disposable
 } blosc2_prefilter_params;
 
 /**
@@ -1219,12 +1220,15 @@ typedef struct {
   //!< The postfilter function.
   blosc2_postfilter_params *postparams;
   //!< The postfilter parameters.
+  int32_t typesize;
+  //!< The type size (8).
 } blosc2_dparams;
 
 /**
  * @brief Default struct for decompression params meant for user initialization.
  */
-static const blosc2_dparams BLOSC2_DPARAMS_DEFAULTS = {1, NULL, NULL, NULL};
+static const blosc2_dparams BLOSC2_DPARAMS_DEFAULTS = {1, NULL, NULL, NULL, 8};
+
 
 /**
  * @brief Create a context for @a *_ctx() compression functions.
@@ -2401,6 +2405,8 @@ typedef struct {
   //!< The codec encoder that is used during compression.
   blosc2_codec_decoder_cb decoder;
   //!< The codec decoder that is used during decompression.
+  // int (*free)(void* codec_params);
+  // //!< Free the codec_params stored in blosc2_context.
 } blosc2_codec;
 
 /**
