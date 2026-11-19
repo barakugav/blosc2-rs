@@ -71,39 +71,34 @@ impl Ndarray {
         let mut cparams = params.cparams.clone();
         let mut dparams = params.dparams.clone();
 
-        let dtype2;
-        let dtype_cstr;
-        let shape2;
-        let chunkshape;
-        let blockshape;
-        match &value {
+        let (dtype2, dtype_cstr, shape2, chunkshape, blockshape) = match &value {
             InitArgs::Zeros(dtype, shape)
             | InitArgs::Nans(dtype, shape)
             | InitArgs::Uninit(dtype, shape)
             | InitArgs::RepeatedValue(dtype, _, shape)
-            | InitArgs::CopyFromValuesBuf(dtype, _, shape) => {
-                dtype2 = dtype;
-                dtype_cstr = std::borrow::Cow::Owned(CString::new(dtype.to_numpy_str()).unwrap());
-                shape2 = shape.as_slice();
-                chunkshape = params.chunkshape_required()?.as_slice();
-                blockshape = params.blockshape_required()?.as_slice();
-            }
-            InitArgs::CopyFromNdarray(ndarray) => {
-                dtype2 = &ndarray.dtype;
-                dtype_cstr = ndarray.dtype_cstr().into();
-                shape2 = ndarray.shape();
-                chunkshape = params
+            | InitArgs::CopyFromValuesBuf(dtype, _, shape) => (
+                dtype,
+                std::borrow::Cow::Owned(CString::new(dtype.to_numpy_str()).unwrap()),
+                shape.as_slice(),
+                params.chunkshape_required()?.as_slice(),
+                params.blockshape_required()?.as_slice(),
+            ),
+            InitArgs::CopyFromNdarray(ndarray) => (
+                &ndarray.dtype,
+                ndarray.dtype_cstr().into(),
+                ndarray.shape(),
+                params
                     .chunkshape
                     .as_ref()
                     .map(|c| c.as_slice())
-                    .unwrap_or_else(|| ndarray.chunkshape());
-                blockshape = params
+                    .unwrap_or_else(|| ndarray.chunkshape()),
+                params
                     .blockshape
                     .as_ref()
                     .map(|b| b.as_slice())
-                    .unwrap_or_else(|| ndarray.blockshape());
-            }
-        }
+                    .unwrap_or_else(|| ndarray.blockshape()),
+            ),
+        };
         let dtype = dtype2;
         let shape = shape2;
 
@@ -1914,7 +1909,7 @@ mod tests {
                 let storage = rand_storage(rand);
                 let array_orig = rand_ndarray::<T>(&shape, rand);
                 let array =
-                    Ndarray::from_ndarray_at(&array_orig, storage.params(), &params).unwrap();
+                    Ndarray::from_ndarray_at(&array_orig, storage.params(), params).unwrap();
 
                 for _ in 0..30 {
                     let idx = shape
@@ -2770,6 +2765,7 @@ mod tests {
     }
 
     #[allow(unused)]
+    #[allow(clippy::too_many_arguments)]
     fn array_allclose_impl(
         data1_ptr: *const (),
         data2_ptr: *const (),
@@ -2846,8 +2842,8 @@ mod tests {
                 _idx: &[usize],
             ) {
                 let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
-                self.result &= self.cmp(val1.re as f64, val2.re as f64);
-                self.result &= self.cmp(val1.im as f64, val2.im as f64);
+                self.result &= self.cmp(val1.re, val2.re);
+                self.result &= self.cmp(val1.im, val2.im);
             }
             fn bool(&mut self, ptr1: *mut bool, ptr2: *mut bool, _idx: &[usize]) {
                 let (val1, val2) = unsafe { (ptr1.read(), ptr2.read()) };
