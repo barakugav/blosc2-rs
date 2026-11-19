@@ -44,7 +44,7 @@ checksum = "6a65b545ab31d687cff52899d4890855fec459eb6afe0da6417b8a18da87aa29"
 
 [[package]]
 name = "blosc2"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "blosc2-rs-sys",
  "cfg-if",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "blosc2-rs-sys"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "bindgen",
  "cc",
